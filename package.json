@@ -3,7 +3,7 @@
   "version": "0.1.0-alpha.1",
   "private": true,
   "engines": {
-    "node": ">=22.13.0"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "concurrently --kill-others --names UI,API --prefix-colors cyan,green \"npm:dev:ui\" \"npm:dev:api\"",

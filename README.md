@@ -80,7 +80,7 @@ npm start
 
 ## Railway deployment
 
-The repository includes `railway.toml` for a single Node web service. Before using the hosted beta:
+Deploy the repository as a single Node 22 web service. Use `npm ci && npm run build` as the build command and `npm run start:railway` as the start command. Before using the hosted beta:
 
 1. Attach a persistent Railway volume to the service. The application uses Railway's `RAILWAY_VOLUME_MOUNT_PATH` automatically and creates `innasc-vault-hosted.sqlite3` there.
 2. Set `INNASC_SERVER_KEY` to a random 32-byte base64url value and `INNASC_SETUP_TOKEN` to a separate high-entropy one-time setup value. Keep both secret and never commit them.
