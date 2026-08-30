@@ -7,7 +7,7 @@ InNasc Vault is a local-first client technology and credential workspace organiz
 The repository contains two evaluation targets that share the same responsive HTML5/TypeScript interface:
 
 - a Windows local build with an Express API and SQLite at `http://localhost:3000`; and
-- a hosted beta with same-origin API routes, encrypted Cloudflare D1 storage, secure cookies, and mandatory MFA.
+- a Railway-hosted beta with same-origin API routes, encrypted SQLite storage on a persistent Railway volume, secure cookies, and mandatory MFA.
 
 No sample passwords, accounts, API keys, or client records are included.
 
@@ -78,4 +78,13 @@ npm run build
 npm start
 ```
 
-The local SQLite schema uses UUID text identifiers and a repository boundary intended to ease a later PostgreSQL migration. The hosted beta currently uses Cloudflare D1 and is not the final paid-service architecture.
+## Railway deployment
+
+The repository includes `railway.toml` for a single Node web service. Before using the hosted beta:
+
+1. Attach a persistent Railway volume to the service. The application uses Railway's `RAILWAY_VOLUME_MOUNT_PATH` automatically and creates `innasc-vault-hosted.sqlite3` there.
+2. Set `INNASC_SERVER_KEY` to a random 32-byte base64url value and `INNASC_SETUP_TOKEN` to a separate high-entropy one-time setup value. Keep both secret and never commit them.
+3. Keep the service at one replica while it uses SQLite.
+4. Configure `/api/health` as the health check, attach the custom domain, and verify Railway volume backups before storing important data.
+
+The SQLite schema uses UUID text identifiers and a repository boundary intended to ease a later PostgreSQL migration. The Railway beta is not the final paid-service architecture.

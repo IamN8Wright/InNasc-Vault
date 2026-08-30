@@ -1,4 +1,7 @@
-import { env } from 'cloudflare:workers';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import Database from 'better-sqlite3';
 
 import { hostedSchemaStatements } from '@/db/schema';
 import { fromBase64Url } from '@/hosted/crypto';
@@ -14,25 +17,49 @@ export class ApiProblem extends Error {
   }
 }
 
-let schemaPromise: Promise<void> | null = null;
+type HostedEnvironment = {
+  INNASC_SERVER_KEY?: string;
+  INNASC_SETUP_TOKEN?: string;
+};
 
-export function hostedEnv() {
-  const bindings = env as Cloudflare.Env;
-  if (!bindings.DB) throw new ApiProblem('Hosted database is not configured.', 503, 'HOSTED_DATABASE_MISSING');
-  return bindings;
+let database: Database.Database | null = null;
+let schemaReady = false;
+
+export function hostedEnv(): HostedEnvironment {
+  return {
+    INNASC_SERVER_KEY: process.env.INNASC_SERVER_KEY,
+    INNASC_SETUP_TOKEN: process.env.INNASC_SETUP_TOKEN,
+  };
+}
+
+function databaseDirectory() {
+  const configured = process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim()
+    || process.env.VAULT_DATA_DIR?.trim()
+    || path.resolve(process.cwd(), 'data');
+  return path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured);
+}
+
+function hostedDatabase() {
+  if (!database) {
+    const directory = databaseDirectory();
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const filename = path.join(directory, 'innasc-vault-hosted.sqlite3');
+    database = new Database(filename);
+    database.pragma('journal_mode = WAL');
+    database.pragma('foreign_keys = ON');
+    database.pragma('busy_timeout = 5000');
+    database.pragma('synchronous = FULL');
+  }
+  return database;
 }
 
 export async function ensureHostedSchema() {
-  if (!schemaPromise) {
-    const database = hostedEnv().DB;
-    schemaPromise = (async () => {
-      for (const statement of hostedSchemaStatements) await database.prepare(statement).run();
-    })().catch((error) => {
-      schemaPromise = null;
-      throw error;
-    });
-  }
-  await schemaPromise;
+  if (schemaReady) return;
+  const activeDatabase = hostedDatabase();
+  activeDatabase.transaction(() => {
+    for (const statement of hostedSchemaStatements) activeDatabase.exec(statement);
+  })();
+  schemaReady = true;
 }
 
 export function serverKey() {
@@ -51,15 +78,19 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
+function bindings(values: unknown[]) {
+  return values.map((value) => value === undefined ? null : value);
+}
+
 export async function first<T>(statement: string, ...values: unknown[]) {
-  return hostedEnv().DB.prepare(statement).bind(...values).first<T>();
+  return hostedDatabase().prepare<unknown[], T>(statement).get(...bindings(values));
 }
 
 export async function all<T>(statement: string, ...values: unknown[]) {
-  const result = await hostedEnv().DB.prepare(statement).bind(...values).all<T>();
-  return result.results;
+  return hostedDatabase().prepare<unknown[], T>(statement).all(...bindings(values));
 }
 
 export async function run(statement: string, ...values: unknown[]) {
-  return hostedEnv().DB.prepare(statement).bind(...values).run();
+  const result = hostedDatabase().prepare<unknown[]>(statement).run(...bindings(values));
+  return { meta: { changes: result.changes } };
 }

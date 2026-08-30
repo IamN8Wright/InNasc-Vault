@@ -35,7 +35,7 @@ Use unique test credentials first. Before storing irreplaceable client secrets, 
 - The hosted API and interface are served from one HTTPS origin. Cookies add the `Secure` attribute.
 - Account passwords and wrapping keys use WebCrypto PBKDF2-HMAC-SHA-256 with 600,000 iterations and per-user random salts.
 - Credential encryption uses WebCrypto AES-256-GCM with per-record random 96-bit nonces and record-bound additional authenticated data.
-- Cloudflare D1 stores encrypted credential payloads, wrapped keys, password hashes, and metadata. The database does not store credential secrets in plaintext.
+- A persistent Railway volume stores the SQLite database containing encrypted credential payloads, wrapped keys, password hashes, and metadata. The database does not store credential secrets in plaintext.
 - A protected deployment key encrypts the temporary workspace-key copy used by active login challenges and sessions. The one-time setup key prevents an unknown visitor from claiming a new deployment.
 - Hosted passkeys are disabled until WebAuthn origin, RP ID, attestation, recovery, and browser behavior receive a dedicated review.
 - Hosted backup export is JSON containing the encrypted blobs and wrapped keys; self-service restore is not implemented yet.
@@ -51,9 +51,10 @@ The hosted design is **not zero knowledge**. The deployed server processes passw
 - The audit hash chain detects simple editing but is not equivalent to a separately controlled, signed append-only audit service. Concurrent hosted writes and privileged database replacement remain outside this guarantee.
 - There is no email verification, invitation delivery, security notification, device approval, remote session management, automatic update channel, breach monitoring, or audited account-recovery workflow.
 - The hosted beta is a single workspace. Billing, subscription enforcement, tenant isolation, organization lifecycle, and customer-support controls are not implemented.
+- The Railway SQLite service must remain at one replica. Multi-replica writes require a tested PostgreSQL migration and concurrency controls.
 - Passkeys are MFA/step-up factors only in the local build, not passwordless vault unlock.
 - Backups are not protected by a separate backup password. They retain encrypted blobs but also include sensitive metadata and password hashes.
-- Hosted key rotation, self-service restore, point-in-time recovery drills, regional data controls, and PostgreSQL migration are not complete.
+- Hosted key rotation, self-service restore, Railway volume-backup drills, point-in-time recovery, regional data controls, and PostgreSQL migration are not complete.
 - Local HTTP is acceptable only for the browser secure-context exception on `localhost`. Never tunnel or port-forward the local API.
 
 ## Required work before a paid production service

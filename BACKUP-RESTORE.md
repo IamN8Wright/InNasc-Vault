@@ -38,6 +38,8 @@ The hosted JSON contains encrypted credential and MFA blobs, wrapped workspace k
 
 Self-service hosted restore is not implemented. Restoring requires a controlled operator procedure against an empty compatible database, migration validation, audit-chain verification, and a login test using a password valid when the backup was created. Do not overwrite a live hosted database with an unverified backup. Maintain at least one separate recovery copy and run an operator-assisted restore drill before relying on the hosted beta for important data.
 
+The Railway volume contains `innasc-vault-hosted.sqlite3` plus possible `-wal` and `-shm` companions. Enable Railway volume backups, but also keep separately controlled encrypted-data exports. A provider snapshot is not a substitute for an application-level export and a tested restore drill.
+
 ## Moving to another Windows PC
 
 Copy the complete extracted application folder and a recent in-app database backup. Install Node.js 22 LTS on the new PC, restore the database as above, and run `Start-InNasc-Vault.cmd`. Passkeys normally stay with their original Windows account/device; TOTP and recovery codes remain available.

@@ -14,8 +14,10 @@
     "start": "concurrently --kill-others --names UI,API --prefix-colors cyan,green \"npm:start:ui\" \"npm:start:api\"",
     "start:ui": "vinext start --port 3000 --hostname 127.0.0.1",
     "start:api": "node dist/local-server/index.js",
+    "start:railway": "vinext start",
     "check": "tsc --noEmit && tsc -p server/tsconfig.json --noEmit && npm run lint",
     "test": "npm run build:api && node tests/api-smoke.mjs",
+    "test:railway": "npm run build && node tests/railway-smoke.mjs",
     "lint": "oxlint app lib server",
     "format": "oxfmt"
   },
@@ -52,9 +54,6 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@cloudflare/workers-types": "4.20260515.1",
-    "@openai/sites-vite-plugin": "0.2.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/cors": "^2.8.19",
@@ -73,8 +72,7 @@
     "tailwindcss": "4.2.1",
     "tsx": "^4.23.13",
     "typescript": "5.9.3",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vite": "8.0.13"
   },
   "type": "module"
 }
