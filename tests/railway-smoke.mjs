@@ -88,17 +88,32 @@ try {
   assert.equal(setup.body.kind, 'enrollment');
   assert.ok(setup.body.manualKey);
 
-  const enrollmentCode = await generate({ secret: setup.body.manualKey });
+  const interruptedStatus = await request('/setup/status');
+  assert.equal(interruptedStatus.body.setupRequired, true);
+  assert.equal(interruptedStatus.body.setupIncomplete, true);
+  const resumedSetup = await request('/setup/start', {
+    method: 'POST',
+    body: { name: 'Resumed Railway Owner', email: 'resumed-owner@example.invalid', password, setupToken },
+  });
+  assert.equal(resumedSetup.response.status, 201);
+  assert.equal(resumedSetup.body.kind, 'enrollment');
+  assert.ok(resumedSetup.body.manualKey);
+
+  const enrollmentCode = await generate({ secret: resumedSetup.body.manualKey });
   const verified = await request('/auth/mfa/verify', {
     method: 'POST',
-    body: { challengeId: setup.body.challengeId, code: enrollmentCode },
+    body: { challengeId: resumedSetup.body.challengeId, code: enrollmentCode },
   });
   assert.equal(verified.response.status, 200);
   assert.equal(verified.body.user.role, 'workspace_owner');
   csrfToken = verified.body.csrfToken;
   assert.ok(cookie.startsWith('innasc_session='));
 
-  const stepUpCode = await generate({ secret: setup.body.manualKey });
+  const completedStatus = await request('/setup/status');
+  assert.equal(completedStatus.body.setupRequired, false);
+  assert.equal(completedStatus.body.setupIncomplete, false);
+
+  const stepUpCode = await generate({ secret: resumedSetup.body.manualKey });
   const stepUp = await request('/auth/step-up', { method: 'POST', body: { code: stepUpCode }, csrf: true });
   assert.equal(stepUp.response.status, 200);
 

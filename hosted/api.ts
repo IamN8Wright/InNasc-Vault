@@ -328,6 +328,13 @@ async function createSession(request: Request, user: UserRow, vaultKey: Uint8Arr
   return { rawToken, csrfToken, expiresAt };
 }
 
+async function incompleteOwnerForSetup() {
+  const users = await all<UserRow>('SELECT * FROM users ORDER BY created_at');
+  if (users.length !== 1 || users[0].role !== 'workspace_owner' || users[0].mfa_enabled !== 0) return null;
+  const clientCount = await first<{ count: number }>('SELECT COUNT(*) AS count FROM clients');
+  return (clientCount?.count ?? 0) === 0 ? users[0] : null;
+}
+
 async function beginSetup(request: Request) {
   const input = setupSchema.parse(await body(request));
   const configuredToken = hostedEnv().INNASC_SETUP_TOKEN;
@@ -337,7 +344,8 @@ async function beginSetup(request: Request) {
   }
   // Fail before inserting the owner if the deployment key cannot protect login challenges.
   serverKey();
-  const userId = newId();
+  const incompleteOwner = await incompleteOwnerForSetup();
+  const userId = incompleteOwner?.id ?? newId();
   const vaultKey = randomBytes(32);
   const salt = base64Url(randomBytes(16));
   const derivedKey = await derivePasswordKey(input.password, salt);
@@ -345,12 +353,23 @@ async function beginSetup(request: Request) {
   const totpSecret = makeTotpSecret();
   const encryptedTotp = await encryptText(totpSecret, vaultKey, `user:${userId}:totp:v1`);
   const timestamp = nowIso();
-  const insert = await run(`INSERT INTO users(id,name,email,role,password_hash,kdf_salt,wrapped_key_nonce,wrapped_key_ciphertext,mfa_secret_nonce,mfa_secret_ciphertext,mfa_enabled,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,0,?,? WHERE NOT EXISTS (SELECT 1 FROM users)`,
-    userId, input.name, input.email.toLowerCase(), 'workspace_owner', await hashPassword(input.password), salt,
-    wrapped.nonce, wrapped.ciphertext, encryptedTotp.nonce, encryptedTotp.ciphertext, timestamp, timestamp);
-  if (Number(insert.meta.changes ?? 0) !== 1) throw new ApiProblem('Workspace setup has already been completed.', 409, 'SETUP_COMPLETE');
+  const passwordHash = await hashPassword(input.password);
+  if (incompleteOwner) {
+    const update = await run(`UPDATE users SET name=?,email=?,password_hash=?,kdf_salt=?,wrapped_key_nonce=?,wrapped_key_ciphertext=?,mfa_secret_nonce=?,mfa_secret_ciphertext=?,failed_login_count=0,locked_until=NULL,last_login_at=NULL,updated_at=? WHERE id=? AND mfa_enabled=0 AND updated_at=?`,
+      input.name, input.email.toLowerCase(), passwordHash, salt, wrapped.nonce, wrapped.ciphertext,
+      encryptedTotp.nonce, encryptedTotp.ciphertext, timestamp, userId, incompleteOwner.updated_at);
+    if (Number(update.meta.changes ?? 0) !== 1) throw new ApiProblem('Owner setup changed while this request was running. Please try again.', 409, 'SETUP_RETRY');
+    await run('DELETE FROM login_challenges WHERE user_id=?', userId);
+    await run('DELETE FROM sessions WHERE user_id=?', userId);
+    await run('DELETE FROM recovery_codes WHERE user_id=?', userId);
+  } else {
+    const insert = await run(`INSERT INTO users(id,name,email,role,password_hash,kdf_salt,wrapped_key_nonce,wrapped_key_ciphertext,mfa_secret_nonce,mfa_secret_ciphertext,mfa_enabled,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,0,?,? WHERE NOT EXISTS (SELECT 1 FROM users)`,
+      userId, input.name, input.email.toLowerCase(), 'workspace_owner', passwordHash, salt,
+      wrapped.nonce, wrapped.ciphertext, encryptedTotp.nonce, encryptedTotp.ciphertext, timestamp, timestamp);
+    if (Number(insert.meta.changes ?? 0) !== 1) throw new ApiProblem('Workspace setup has already been completed.', 409, 'SETUP_COMPLETE');
+  }
   const user = (await getUserById(userId))!;
-  await audit(request, { actorUserId: userId, eventType: 'auth.setup', targetType: 'workspace' });
+  await audit(request, { actorUserId: userId, eventType: incompleteOwner ? 'auth.setup_resume' : 'auth.setup', targetType: 'workspace' });
   return json(await issueChallenge(user, vaultKey), 201);
 }
 
@@ -689,7 +708,8 @@ export async function handleHostedApi(request: Request) {
     if (path === 'health' && method === 'GET') return json({ status: 'ok', service: 'InNasc Vault hosted API' });
     if (path === 'setup/status' && method === 'GET') {
       const count = await first<{ count: number }>('SELECT COUNT(*) AS count FROM users');
-      return json({ setupRequired: (count?.count ?? 0) === 0, setupTokenRequired: true });
+      const setupIncomplete = Boolean(await incompleteOwnerForSetup());
+      return json({ setupRequired: (count?.count ?? 0) === 0 || setupIncomplete, setupIncomplete, setupTokenRequired: true });
     }
     if (path === 'setup/start' && method === 'POST') return await beginSetup(request);
     if (path === 'auth/login' && method === 'POST') return await beginLogin(request);

@@ -166,6 +166,7 @@ function messageFrom(error: unknown) {
 export default function VaultApp() {
   const [booting, setBooting] = useState(true);
   const [setupRequired, setSetupRequired] = useState(false);
+  const [setupIncomplete, setSetupIncomplete] = useState(false);
   const [setupTokenRequired, setSetupTokenRequired] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [offline, setOffline] = useState(false);
@@ -174,8 +175,9 @@ export default function VaultApp() {
     setBooting(true);
     setOffline(false);
     try {
-      const status = await api<{ setupRequired: boolean; setupTokenRequired?: boolean }>('/setup/status');
+      const status = await api<{ setupRequired: boolean; setupIncomplete?: boolean; setupTokenRequired?: boolean }>('/setup/status');
       setSetupRequired(status.setupRequired);
+      setSetupIncomplete(Boolean(status.setupIncomplete));
       setSetupTokenRequired(Boolean(status.setupTokenRequired));
       if (!status.setupRequired) {
         try {
@@ -200,10 +202,12 @@ export default function VaultApp() {
     return (
       <AuthScreen
         setupRequired={setupRequired}
+        setupIncomplete={setupIncomplete}
         setupTokenRequired={setupTokenRequired}
         onAuthenticated={(next) => {
           setSession(next);
           setSetupRequired(false);
+          setSetupIncomplete(false);
         }}
       />
     );
@@ -239,7 +243,7 @@ function OfflineScreen({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-function AuthScreen({ setupRequired, setupTokenRequired, onAuthenticated }: { setupRequired: boolean; setupTokenRequired: boolean; onAuthenticated: (session: Session) => void }) {
+function AuthScreen({ setupRequired, setupIncomplete, setupTokenRequired, onAuthenticated }: { setupRequired: boolean; setupIncomplete: boolean; setupTokenRequired: boolean; onAuthenticated: (session: Session) => void }) {
   const [stage, setStage] = useState<'credentials' | 'mfa' | 'recovery'>(setupRequired ? 'credentials' : 'credentials');
   const [challenge, setChallenge] = useState<LoginChallenge | null>(null);
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
@@ -337,9 +341,9 @@ function AuthScreen({ setupRequired, setupTokenRequired, onAuthenticated }: { se
         {stage === 'credentials' ? (
           <>
             <span className="auth-icon"><LockKeyhole /></span>
-            <p className="eyebrow">{setupRequired ? 'FIRST-RUN SETUP' : 'SECURE LOCAL WORKSPACE'}</p>
-            <h1>{setupRequired ? 'Create the workspace owner' : 'Welcome back'}</h1>
-            <p className="auth-copy">{setupRequired ? 'Your password unlocks the local encryption key. MFA enrollment is required before the vault opens.' : 'Enter your password, then confirm with your authenticator or passkey.'}</p>
+            <p className="eyebrow">{setupIncomplete ? 'RESUME SETUP' : setupRequired ? 'FIRST-RUN SETUP' : 'SECURE LOCAL WORKSPACE'}</p>
+            <h1>{setupIncomplete ? 'Resume workspace owner setup' : setupRequired ? 'Create the workspace owner' : 'Welcome back'}</h1>
+            <p className="auth-copy">{setupIncomplete ? 'The earlier enrollment did not finish. Re-enter the owner details to create a fresh MFA enrollment.' : setupRequired ? 'Your password unlocks the local encryption key. MFA enrollment is required before the vault opens.' : 'Enter your password, then confirm with your authenticator or passkey.'}</p>
             <form className="auth-form" onSubmit={submitCredentials}>
               {setupRequired && <label>Full name<Input name="name" autoComplete="name" required minLength={2} /></label>}
               {setupRequired && setupTokenRequired && <label>Deployment setup key<Input name="setupToken" type="password" autoComplete="off" required /></label>}
@@ -347,7 +351,7 @@ function AuthScreen({ setupRequired, setupTokenRequired, onAuthenticated }: { se
               <label>Password<Input name="password" type="password" autoComplete={setupRequired ? 'new-password' : 'current-password'} required minLength={setupRequired ? 14 : 1} /></label>
               {setupRequired && <p className="field-hint">At least 14 characters with uppercase, lowercase, number, and symbol.</p>}
               {error && <Alert variant="destructive"><AlertTriangle /><AlertTitle>Couldn’t continue</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-              <Button size="lg" type="submit" disabled={busy}>{busy ? <RefreshCw className="spin" /> : <ShieldCheck />} {setupRequired ? 'Create secure workspace' : 'Continue to MFA'}</Button>
+              <Button size="lg" type="submit" disabled={busy}>{busy ? <RefreshCw className="spin" /> : <ShieldCheck />} {setupIncomplete ? 'Resume secure setup' : setupRequired ? 'Create secure workspace' : 'Continue to MFA'}</Button>
             </form>
           </>
         ) : (
