@@ -43,6 +43,7 @@ type UserRow = {
   mfa_enabled: number;
   failed_login_count: number;
   locked_until: string | null;
+  disabled_at: string | null;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
@@ -123,7 +124,18 @@ const credentialSchema = z.object({
   expiresAt: z.string().datetime().nullable().optional(),
   secret: secretSchema,
 });
-const userSchema = z.object({ name: z.string().trim().min(2).max(120), email: z.string().trim().email().max(254), password: strongPassword, role: z.enum(roles).refine((role) => role !== 'workspace_owner') });
+const userSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(254),
+  password: strongPassword,
+  role: z.enum(roles).refine((role) => role !== 'workspace_owner'),
+  clientId: z.string().uuid().nullable().optional(),
+  canView: z.boolean().default(true),
+  canManage: z.boolean().default(false),
+  canReveal: z.boolean().default(false),
+  canExport: z.boolean().default(false),
+});
+const userProfileSchema = z.object({ name: z.string().trim().min(2).max(120), email: z.string().trim().email().max(254) });
 const permissionSchema = z.object({
   userId: z.string().uuid(),
   clientId: z.string().uuid().nullable(),
@@ -184,6 +196,7 @@ async function getUserById(id: string) {
 
 async function publicUser(user: UserRow) {
   const recovery = await first<{ count: number }>('SELECT COUNT(*) AS count FROM recovery_codes WHERE user_id = ? AND used_at IS NULL', user.id);
+  const clientIds = (await all<{ client_id: string }>('SELECT DISTINCT client_id FROM permissions WHERE user_id=? AND client_id IS NOT NULL ORDER BY client_id', user.id)).map((row) => row.client_id);
   return {
     id: user.id,
     name: user.name,
@@ -192,6 +205,8 @@ async function publicUser(user: UserRow) {
     mfaEnabled: Boolean(user.mfa_enabled),
     recoveryCodesRemaining: recovery?.count ?? 0,
     passkeyCount: 0,
+    clientIds,
+    disabledAt: user.disabled_at,
     lastLoginAt: user.last_login_at,
   };
 }
@@ -233,6 +248,10 @@ async function requireAuth(request: Request) {
     if (row) await run('DELETE FROM sessions WHERE id_hash=?', idHash);
     throw new ApiProblem('Your session expired. Sign in again.', 401, 'AUTH_REQUIRED');
   }
+  if (row.disabled_at) {
+    await run('DELETE FROM sessions WHERE id_hash=?', idHash);
+    throw new ApiProblem('This account no longer has access.', 401, 'AUTH_REQUIRED');
+  }
   const vaultKey = await decryptBytes(row.vault_key_nonce, row.vault_key_ciphertext, serverKey(), `session:${idHash}:vault-key:v1`);
   await run('UPDATE sessions SET last_seen_at=? WHERE id_hash=?', nowIso(), idHash);
   return { sessionIdHash: idHash, csrfToken: row.csrf_token, expiresAt: row.expires_at, stepUpUntil: row.step_up_until, user: row, vaultKey } satisfies AuthContext;
@@ -249,6 +268,53 @@ function requireStepUp(auth: AuthContext) {
 
 function assertWorkspaceAdmin(auth: AuthContext) {
   if (auth.user.role !== 'workspace_owner' && auth.user.role !== 'admin') throw new ApiProblem('Workspace administration permission is required.', 403, 'PERMISSION_DENIED');
+}
+
+function workspaceAdmin(user: UserRow) {
+  return user.role === 'workspace_owner' || user.role === 'admin';
+}
+
+async function assignedClientIds(userId: string) {
+  return (await all<{ client_id: string }>('SELECT DISTINCT client_id FROM permissions WHERE user_id=? AND client_id IS NOT NULL ORDER BY client_id', userId)).map((row) => row.client_id);
+}
+
+async function manageableClientIds(user: UserRow) {
+  if (workspaceAdmin(user)) return null;
+  if (user.role !== 'client_admin') return [];
+  return (await all<{ client_id: string }>(`SELECT DISTINCT client_id FROM permissions WHERE user_id=? AND can_manage=1 AND client_id IS NOT NULL AND location_id IS NULL AND collection IS NULL ORDER BY client_id`, user.id)).map((row) => row.client_id);
+}
+
+function assertUserManager(user: UserRow) {
+  if (!workspaceAdmin(user) && user.role !== 'client_admin') throw new ApiProblem('User administration permission is required.', 403, 'PERMISSION_DENIED');
+}
+
+async function canManageTargetUser(actor: UserRow, target: UserRow) {
+  if (workspaceAdmin(actor)) return target.role !== 'workspace_owner' || actor.role === 'workspace_owner';
+  if (actor.role !== 'client_admin' || target.role !== 'client_user') return false;
+  const manageable = await manageableClientIds(actor) ?? [];
+  const assigned = await assignedClientIds(target.id);
+  return assigned.length > 0 && assigned.every((clientId) => manageable.includes(clientId));
+}
+
+async function assertCanManageTargetUser(actor: UserRow, target: UserRow) {
+  assertUserManager(actor);
+  if (!(await canManageTargetUser(actor, target))) throw new ApiProblem('You cannot manage this user or one of their assigned clients.', 403, 'PERMISSION_DENIED');
+}
+
+async function savePermissionGrant(request: Request, auth: AuthContext, input: z.infer<typeof permissionSchema>) {
+  const scopeKey = `${input.clientId ?? '*'}|${input.locationId ?? '*'}|${input.collection ?? '*'}`;
+  const timestamp = nowIso();
+  await run(`INSERT INTO permissions(id,user_id,scope_key,client_id,location_id,collection,can_view,can_manage,can_reveal,can_export,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,scope_key) DO UPDATE SET can_view=excluded.can_view,can_manage=excluded.can_manage,can_reveal=excluded.can_reveal,can_export=excluded.can_export,updated_at=excluded.updated_at`, newId(), input.userId, scopeKey, input.clientId, input.locationId ?? null, input.collection ?? null, input.canView ? 1 : 0, input.canManage ? 1 : 0, input.canReveal ? 1 : 0, input.canExport ? 1 : 0, auth.user.id, timestamp, timestamp);
+  await audit(request, { actorUserId: auth.user.id, eventType: 'permission.change', targetType: 'user', targetId: input.userId, clientId: input.clientId, detail: { scopeKey, canView: input.canView, canManage: input.canManage, canReveal: input.canReveal, canExport: input.canExport } });
+  return scopeKey;
+}
+
+async function resetHostedUserMfa(target: UserRow, vaultKey: Uint8Array) {
+  const encryptedTotp = await encryptText(makeTotpSecret(), vaultKey, `user:${target.id}:totp:v1`);
+  await run('UPDATE users SET mfa_secret_nonce=?,mfa_secret_ciphertext=?,mfa_enabled=0,updated_at=? WHERE id=?', encryptedTotp.nonce, encryptedTotp.ciphertext, nowIso(), target.id);
+  await run('DELETE FROM recovery_codes WHERE user_id=?', target.id);
+  await run('DELETE FROM sessions WHERE user_id=?', target.id);
+  await run('DELETE FROM login_challenges WHERE user_id=?', target.id);
 }
 
 async function visibleClientIds(user: UserRow) {
@@ -388,6 +454,10 @@ async function beginLogin(request: Request) {
     await run('UPDATE users SET failed_login_count=?,locked_until=?,updated_at=? WHERE id=?', failures >= 5 ? 0 : failures, lockedUntil, nowIso(), user.id);
     await audit(request, { actorUserId: user.id, eventType: 'auth.sign_in', targetType: 'user', targetId: user.id, outcome: 'failure', detail: { reason: lockedUntil ? 'locked' : 'invalid_credentials' } });
     throw new ApiProblem('Email or password is incorrect.', 401, 'INVALID_CREDENTIALS');
+  }
+  if (user.disabled_at) {
+    await audit(request, { actorUserId: user.id, eventType: 'auth.sign_in', targetType: 'user', targetId: user.id, outcome: 'blocked', detail: { reason: 'account_removed' } });
+    throw new ApiProblem('This account has been removed. Contact an administrator.', 403, 'ACCOUNT_REMOVED');
   }
   const derivedKey = await derivePasswordKey(input.password, user.kdf_salt);
   const vaultKey = await decryptBytes(user.wrapped_key_nonce, user.wrapped_key_ciphertext, derivedKey, `user:${user.id}:vault-key:v1`);
@@ -598,56 +668,114 @@ async function handleProtected(request: Request, path: string, method: string, a
   }
 
   if (path === 'users' && method === 'GET') {
-    assertWorkspaceAdmin(auth);
+    assertUserManager(auth.user);
     const users = await all<UserRow>('SELECT * FROM users ORDER BY name');
-    return json(await Promise.all(users.map(publicUser)));
+    const visibleUsers: UserRow[] = [];
+    for (const user of users) {
+      if (workspaceAdmin(auth.user) || await canManageTargetUser(auth.user, user)) visibleUsers.push(user);
+    }
+    return json(await Promise.all(visibleUsers.map(publicUser)));
   }
   if (path === 'users' && method === 'POST') {
-    assertWorkspaceAdmin(auth);
+    requireStepUp(auth); assertUserManager(auth.user);
     const input = userSchema.parse(await body(request));
+    if (auth.user.role === 'client_admin') {
+      if (input.role !== 'client_user' || !input.clientId) throw new ApiProblem('Client Admins may create Client Users only within an assigned client.', 403, 'PERMISSION_DENIED');
+      const manageable = await manageableClientIds(auth.user) ?? [];
+      if (!manageable.includes(input.clientId)) throw new ApiProblem('You cannot add users to this client.', 403, 'PERMISSION_DENIED');
+    }
+    if (input.clientId && !(await first('SELECT id FROM clients WHERE id=?', input.clientId))) throw new ApiProblem('Client not found.');
+    if (input.clientId && auth.user.role === 'client_admin') {
+      const scope = { clientId: input.clientId };
+      for (const [enabled, action] of [[input.canView, 'view'], [input.canManage, 'manage'], [input.canReveal, 'reveal'], [input.canExport, 'export']] as const) {
+        if (enabled && !(await hasPermission(auth.user, scope, action))) throw new ApiProblem(`You cannot grant ${action} access that you do not have.`, 403, 'PERMISSION_DENIED');
+      }
+    }
     if (await first('SELECT id FROM users WHERE email=? COLLATE NOCASE', input.email)) throw new ApiProblem('A user with that email already exists.', 409);
     const userId = newId(); const timestamp = nowIso(); const salt = base64Url(randomBytes(16));
     const wrapped = await encryptBytes(auth.vaultKey, await derivePasswordKey(input.password, salt), `user:${userId}:vault-key:v1`);
     const encryptedTotp = await encryptText(makeTotpSecret(), auth.vaultKey, `user:${userId}:totp:v1`);
     await run('INSERT INTO users(id,name,email,role,password_hash,kdf_salt,wrapped_key_nonce,wrapped_key_ciphertext,mfa_secret_nonce,mfa_secret_ciphertext,mfa_enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)', userId, input.name, input.email.toLowerCase(), input.role, await hashPassword(input.password), salt, wrapped.nonce, wrapped.ciphertext, encryptedTotp.nonce, encryptedTotp.ciphertext, timestamp, timestamp);
     await audit(request, { actorUserId: auth.user.id, eventType: 'user.create', targetType: 'user', targetId: userId, detail: { role: input.role } });
+    if (input.clientId) await savePermissionGrant(request, auth, { userId, clientId: input.clientId, locationId: null, collection: null, canView: input.canView, canManage: input.canManage, canReveal: input.canReveal, canExport: input.canExport });
     return json(await publicUser((await getUserById(userId))!), 201);
   }
   const userMatch = path.match(/^users\/([0-9a-f-]+)$/u);
   if (userMatch && method === 'PATCH') {
-    requireStepUp(auth); assertWorkspaceAdmin(auth);
+    requireStepUp(auth);
     const target = await getUserById(userMatch[1]); if (!target) throw new ApiProblem('User not found.', 404);
-    const input = z.object({ name: z.string().trim().min(2).max(120) }).parse(await body(request));
-    await run('UPDATE users SET name=?,updated_at=? WHERE id=?', input.name, nowIso(), target.id);
-    await audit(request, { actorUserId: auth.user.id, eventType: 'user.update', targetType: 'user', targetId: target.id, detail: { field: 'name' } });
-    target.name = input.name; return json(await publicUser(target));
+    await assertCanManageTargetUser(auth.user, target);
+    const input = userProfileSchema.parse(await body(request));
+    if (await first('SELECT id FROM users WHERE email=? COLLATE NOCASE AND id<>?', input.email, target.id)) throw new ApiProblem('A user with that email already exists.', 409);
+    const previousName = target.name; const previousEmail = target.email;
+    await run('UPDATE users SET name=?,email=?,updated_at=? WHERE id=?', input.name, input.email.toLowerCase(), nowIso(), target.id);
+    if (previousEmail.toLowerCase() !== input.email.toLowerCase() && target.id !== auth.user.id) await run('DELETE FROM sessions WHERE user_id=?', target.id);
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.update', targetType: 'user', targetId: target.id, detail: { fields: ['name', 'email'], previousName, name: input.name, previousEmail, email: input.email.toLowerCase() } });
+    return json(await publicUser((await getUserById(target.id))!));
+  }
+  if (userMatch && method === 'DELETE') {
+    requireStepUp(auth);
+    const target = await getUserById(userMatch[1]); if (!target) throw new ApiProblem('User not found.', 404);
+    await assertCanManageTargetUser(auth.user, target);
+    if (target.id === auth.user.id) throw new ApiProblem('You cannot remove your own account.');
+    if (target.role === 'workspace_owner') throw new ApiProblem('The Workspace Owner cannot be removed.', 403, 'PERMISSION_DENIED');
+    if (target.disabled_at) return json({ removed: true });
+    await resetHostedUserMfa(target, auth.vaultKey);
+    const removedAt = nowIso();
+    await run('UPDATE users SET disabled_at=?,updated_at=? WHERE id=?', removedAt, removedAt, target.id);
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.remove', targetType: 'user', targetId: target.id, detail: { role: target.role } });
+    return json({ removed: true, disabledAt: removedAt });
+  }
+  const restoreMatch = path.match(/^users\/([0-9a-f-]+)\/restore$/u);
+  if (restoreMatch && method === 'POST') {
+    requireStepUp(auth);
+    const target = await getUserById(restoreMatch[1]); if (!target) throw new ApiProblem('User not found.', 404);
+    await assertCanManageTargetUser(auth.user, target);
+    await run('UPDATE users SET disabled_at=NULL,updated_at=? WHERE id=?', nowIso(), target.id);
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.restore', targetType: 'user', targetId: target.id, detail: { role: target.role } });
+    return json(await publicUser((await getUserById(target.id))!));
   }
   const resetMatch = path.match(/^users\/([0-9a-f-]+)\/reset-mfa$/u);
   if (resetMatch && method === 'POST') {
-    requireStepUp(auth); assertWorkspaceAdmin(auth);
+    requireStepUp(auth);
     const target = await getUserById(resetMatch[1]); if (!target) throw new ApiProblem('User not found.', 404);
+    await assertCanManageTargetUser(auth.user, target);
+    if (target.disabled_at) throw new ApiProblem('Restore this user before resetting MFA.', 409);
     if (target.role === 'workspace_owner' && target.id !== auth.user.id) throw new ApiProblem('Another administrator cannot reset the workspace owner.', 403);
-    const encryptedTotp = await encryptText(makeTotpSecret(), auth.vaultKey, `user:${target.id}:totp:v1`);
-    await run('UPDATE users SET mfa_secret_nonce=?,mfa_secret_ciphertext=?,mfa_enabled=0,updated_at=? WHERE id=?', encryptedTotp.nonce, encryptedTotp.ciphertext, nowIso(), target.id);
-    await run('DELETE FROM recovery_codes WHERE user_id=?', target.id); await run('DELETE FROM sessions WHERE user_id=?', target.id);
+    await resetHostedUserMfa(target, auth.vaultKey);
     await audit(request, { actorUserId: auth.user.id, eventType: 'auth.mfa_reset', targetType: 'user', targetId: target.id });
     return json({ reset: true });
   }
 
   if (path === 'permissions' && method === 'GET') {
-    assertWorkspaceAdmin(auth);
-    return json(await all('SELECT id,user_id,client_id,location_id,collection,can_view,can_manage,can_reveal,can_export,updated_at FROM permissions ORDER BY updated_at DESC'));
+    assertUserManager(auth.user);
+    const rows = await all<{ user_id: string; client_id: string | null } & Record<string, unknown>>('SELECT id,user_id,client_id,location_id,collection,can_view,can_manage,can_reveal,can_export,updated_at FROM permissions ORDER BY updated_at DESC');
+    if (workspaceAdmin(auth.user)) return json(rows);
+    const manageable = await manageableClientIds(auth.user) ?? [];
+    const visible = [];
+    for (const row of rows) {
+      const target = await getUserById(row.user_id);
+      if (target && row.client_id && manageable.includes(row.client_id) && await canManageTargetUser(auth.user, target)) visible.push(row);
+    }
+    return json(visible);
   }
   if (path === 'permissions' && method === 'POST') {
-    requireStepUp(auth); assertWorkspaceAdmin(auth);
+    requireStepUp(auth); assertUserManager(auth.user);
     const input = permissionSchema.parse(await body(request));
-    if (!(await getUserById(input.userId))) throw new ApiProblem('User not found.', 404);
+    const target = await getUserById(input.userId); if (!target) throw new ApiProblem('User not found.', 404);
+    if (!workspaceAdmin(auth.user)) {
+      await assertCanManageTargetUser(auth.user, target);
+      const manageable = await manageableClientIds(auth.user) ?? [];
+      if (!input.clientId || !manageable.includes(input.clientId)) throw new ApiProblem('You cannot manage permissions for this client.', 403, 'PERMISSION_DENIED');
+      const scope = { clientId: input.clientId, locationId: input.locationId, collection: input.collection };
+      for (const [enabled, action] of [[input.canView, 'view'], [input.canManage, 'manage'], [input.canReveal, 'reveal'], [input.canExport, 'export']] as const) {
+        if (enabled && !(await hasPermission(auth.user, scope, action))) throw new ApiProblem(`You cannot grant ${action} access that you do not have.`, 403, 'PERMISSION_DENIED');
+      }
+    }
     if (input.locationId && !input.clientId) throw new ApiProblem('A location permission must include its client.');
     if (input.clientId && !(await first('SELECT id FROM clients WHERE id=?', input.clientId))) throw new ApiProblem('Client not found.');
     if (input.locationId) await assertLocation(input.clientId!, input.locationId);
-    const scopeKey = `${input.clientId ?? '*'}|${input.locationId ?? '*'}|${input.collection ?? '*'}`; const timestamp = nowIso();
-    await run(`INSERT INTO permissions(id,user_id,scope_key,client_id,location_id,collection,can_view,can_manage,can_reveal,can_export,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,scope_key) DO UPDATE SET can_view=excluded.can_view,can_manage=excluded.can_manage,can_reveal=excluded.can_reveal,can_export=excluded.can_export,updated_at=excluded.updated_at`, newId(), input.userId, scopeKey, input.clientId, input.locationId ?? null, input.collection ?? null, input.canView ? 1 : 0, input.canManage ? 1 : 0, input.canReveal ? 1 : 0, input.canExport ? 1 : 0, auth.user.id, timestamp, timestamp);
-    await audit(request, { actorUserId: auth.user.id, eventType: 'permission.change', targetType: 'user', targetId: input.userId, clientId: input.clientId, detail: { scopeKey, canView: input.canView, canManage: input.canManage, canReveal: input.canReveal, canExport: input.canExport } });
+    const scopeKey = await savePermissionGrant(request, auth, input);
     return json({ saved: true, scopeKey });
   }
 

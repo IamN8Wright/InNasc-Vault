@@ -68,3 +68,19 @@ export function visibleClientIds(user: UserRow) {
   if (user.role === 'workspace_owner' || user.role === 'admin') return null;
   return (db.prepare('SELECT DISTINCT client_id FROM permissions WHERE user_id = ? AND can_view = 1 AND client_id IS NOT NULL').all(user.id) as Array<{ client_id: string }>).map((row) => row.client_id);
 }
+
+export function assignedClientIds(userId: string) {
+  return (db.prepare('SELECT DISTINCT client_id FROM permissions WHERE user_id = ? AND client_id IS NOT NULL ORDER BY client_id').all(userId) as Array<{ client_id: string }>).map((row) => row.client_id);
+}
+
+export function manageableClientIds(user: UserRow) {
+  if (user.role === 'workspace_owner' || user.role === 'admin') return null;
+  if (user.role !== 'client_admin') return [];
+  return (db.prepare(`
+    SELECT DISTINCT client_id
+    FROM permissions
+    WHERE user_id = ? AND can_manage = 1 AND client_id IS NOT NULL
+      AND location_id IS NULL AND collection IS NULL
+    ORDER BY client_id
+  `).all(user.id) as Array<{ client_id: string }>).map((row) => row.client_id);
+}

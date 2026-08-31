@@ -124,6 +124,42 @@ try {
   });
   assert.equal(client.response.status, 201);
 
+  const hostedClientUserPassword = `A!a1${crypto.randomBytes(18).toString('base64url')}`;
+  const hostedClientUser = await request('/users', {
+    method: 'POST',
+    body: {
+      name: 'Hosted Client User',
+      email: 'hosted-client-user@example.invalid',
+      password: hostedClientUserPassword,
+      role: 'client_user',
+      clientId: client.body.id,
+      canView: true,
+      canManage: false,
+      canReveal: true,
+      canExport: false,
+    },
+    csrf: true,
+  });
+  assert.equal(hostedClientUser.response.status, 201);
+  assert.deepEqual(hostedClientUser.body.clientIds, [client.body.id]);
+
+  const updatedHostedClientUser = await request(`/users/${hostedClientUser.body.id}`, {
+    method: 'PATCH',
+    body: { name: 'Updated Hosted Client User', email: 'updated-hosted-client-user@example.invalid' },
+    csrf: true,
+  });
+  assert.equal(updatedHostedClientUser.response.status, 200);
+  assert.equal(updatedHostedClientUser.body.email, 'updated-hosted-client-user@example.invalid');
+
+  const removedHostedClientUser = await request(`/users/${hostedClientUser.body.id}`, { method: 'DELETE', body: {}, csrf: true });
+  assert.equal(removedHostedClientUser.response.status, 200);
+  assert.ok(removedHostedClientUser.body.disabledAt);
+
+  const restoredHostedClientUser = await request(`/users/${hostedClientUser.body.id}/restore`, { method: 'POST', body: {}, csrf: true });
+  assert.equal(restoredHostedClientUser.response.status, 200);
+  assert.equal(restoredHostedClientUser.body.disabledAt, null);
+  assert.equal(restoredHostedClientUser.body.mfaEnabled, false);
+
   const location = await request('/locations', {
     method: 'POST',
     body: { clientId: client.body.id, name: 'Synthetic Location', address: '', notes: '' },
@@ -180,11 +216,12 @@ try {
 
   const renamed = await request(`/users/${verified.body.user.id}`, {
     method: 'PATCH',
-    body: { name: 'Renamed Railway Owner' },
+    body: { name: 'Renamed Railway Owner', email: 'renamed-railway-owner@example.invalid' },
     csrf: true,
   });
   assert.equal(renamed.response.status, 200);
   assert.equal(renamed.body.name, 'Renamed Railway Owner');
+  assert.equal(renamed.body.email, 'renamed-railway-owner@example.invalid');
 
   const documentation = await request('/exports/documentation', {
     method: 'POST',
@@ -210,8 +247,10 @@ try {
   assert.ok(Array.isArray(audit.body));
   assert.ok(audit.body.some((entry) => entry.event_type === 'credential.reveal'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
 
-  console.log('PASS: Railway hosted MFA, encryption, step-up, rename, exports, backup, and audit smoke test');
+  console.log('PASS: Railway hosted MFA, user editing/removal, encryption, exports, backup, and audit smoke test');
 } finally {
   server.kill();
   await delay(500);

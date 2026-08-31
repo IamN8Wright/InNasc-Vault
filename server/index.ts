@@ -25,7 +25,7 @@ app.use(helmet({
 }));
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || origin === config.origin) return callback(null, true);
+    if (!origin || config.allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error('Origin not allowed.'));
   },
   credentials: true,

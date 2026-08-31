@@ -54,7 +54,7 @@ The password unlocks the wrapped workspace key. There is no password-reset backd
 - **Clients:** create client, location, and system records.
 - **Credential vault:** add, reveal, copy, edit, or delete encrypted secrets. Reveal and copy require a fresh MFA check.
 - **Devices & software:** track non-secret inventory. Put passwords and tokens in the vault instead of notes.
-- **Users & permissions:** create users, edit their display names, and grant specific client/location/collection access. New users must enroll MFA on first sign-in.
+- **Users & permissions:** Workspace Owners/Admins can create users, edit names and sign-in emails, grant scoped access, reset MFA, and safely remove or restore accounts. Client Admins can create and manage Client Users only inside their assigned client-wide management scopes. New and restored users must enroll MFA on first sign-in.
 - **Security & backup:** enroll a local passkey, export password-free documentation, or download an encrypted-data backup.
 
 ## Local data location

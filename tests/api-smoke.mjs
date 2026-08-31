@@ -17,6 +17,7 @@ const origin = 'http://localhost:3000';
 const password = `A!a1${crypto.randomBytes(18).toString('base64url')}`;
 const testSecret = `synthetic-${crypto.randomBytes(18).toString('base64url')}`;
 let cookie = '';
+let csrfToken = '';
 
 const server = spawn(process.execPath, ['dist/local-server/index.js'], {
   cwd: process.cwd(),
@@ -79,7 +80,7 @@ try {
   assert.equal(verified.response.status, 200);
   assert.equal(verified.body.user.role, 'workspace_owner');
   assert.equal(verified.body.recoveryCodes.length, 10);
-  const csrfToken = verified.body.csrfToken;
+  csrfToken = verified.body.csrfToken;
 
   const secured = (body) => ({
     method: 'POST',
@@ -89,6 +90,97 @@ try {
 
   const client = await request('/clients', secured({ name: 'Automated Test Client', code: 'TEST', notes: '' }));
   assert.equal(client.response.status, 201);
+
+  const userAdminStepUpToken = await generate({ secret: setup.body.manualKey });
+  const userAdminStepUp = await request('/auth/step-up', secured({ code: userAdminStepUpToken }));
+  assert.equal(userAdminStepUp.response.status, 200);
+
+  const ownerCookie = cookie;
+  const ownerCsrfToken = csrfToken;
+  const clientAdminPassword = `A!a1${crypto.randomBytes(18).toString('base64url')}`;
+  const clientAdmin = await request('/users', secured({
+    name: 'Automated Client Admin',
+    email: 'client-admin@example.invalid',
+    password: clientAdminPassword,
+    role: 'client_admin',
+    clientId: client.body.id,
+    canView: true,
+    canManage: true,
+    canReveal: true,
+    canExport: true,
+  }));
+  assert.equal(clientAdmin.response.status, 201);
+  assert.deepEqual(clientAdmin.body.clientIds, [client.body.id]);
+
+  cookie = '';
+  const clientAdminLogin = await request('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'client-admin@example.invalid', password: clientAdminPassword }),
+  });
+  assert.equal(clientAdminLogin.response.status, 200);
+  assert.equal(clientAdminLogin.body.kind, 'enrollment');
+  const clientAdminEnrollmentCode = await generate({ secret: clientAdminLogin.body.manualKey });
+  const clientAdminVerified = await request('/auth/mfa/verify', {
+    method: 'POST',
+    body: JSON.stringify({ challengeId: clientAdminLogin.body.challengeId, code: clientAdminEnrollmentCode }),
+  });
+  assert.equal(clientAdminVerified.response.status, 200);
+  csrfToken = clientAdminVerified.body.csrfToken;
+  const clientAdminStepUpCode = await generate({ secret: clientAdminLogin.body.manualKey });
+  const clientAdminStepUp = await request('/auth/step-up', secured({ code: clientAdminStepUpCode }));
+  assert.equal(clientAdminStepUp.response.status, 200);
+
+  const forbiddenAdmin = await request('/users', secured({
+    name: 'Forbidden Admin',
+    email: 'forbidden-admin@example.invalid',
+    password: clientAdminPassword,
+    role: 'admin',
+    clientId: null,
+    canView: false,
+    canManage: false,
+    canReveal: false,
+    canExport: false,
+  }));
+  assert.equal(forbiddenAdmin.response.status, 403);
+
+  const clientUserPassword = `A!a1${crypto.randomBytes(18).toString('base64url')}`;
+  const clientUser = await request('/users', secured({
+    name: 'Automated Client User',
+    email: 'client-user@example.invalid',
+    password: clientUserPassword,
+    role: 'client_user',
+    clientId: client.body.id,
+    canView: true,
+    canManage: false,
+    canReveal: true,
+    canExport: false,
+  }));
+  assert.equal(clientUser.response.status, 201);
+  assert.equal(clientUser.body.role, 'client_user');
+  assert.deepEqual(clientUser.body.clientIds, [client.body.id]);
+
+  const updatedClientUser = await request(`/users/${clientUser.body.id}`, {
+    ...secured({ name: 'Updated Client User', email: 'updated-client-user@example.invalid' }),
+    method: 'PATCH',
+  });
+  assert.equal(updatedClientUser.response.status, 200);
+  assert.equal(updatedClientUser.body.email, 'updated-client-user@example.invalid');
+
+  const removedClientUser = await request(`/users/${clientUser.body.id}`, { ...secured({}), method: 'DELETE' });
+  assert.equal(removedClientUser.response.status, 200);
+  const removedUsers = await request('/users');
+  assert.ok(removedUsers.body.find((user) => user.id === clientUser.body.id)?.disabledAt);
+
+  const restoredClientUser = await request(`/users/${clientUser.body.id}/restore`, secured({}));
+  assert.equal(restoredClientUser.response.status, 200);
+  assert.equal(restoredClientUser.body.disabledAt, null);
+  assert.equal(restoredClientUser.body.mfaEnabled, false);
+
+  cookie = ownerCookie;
+  csrfToken = ownerCsrfToken;
+  const sessionDatabase = new Database(databasePath);
+  sessionDatabase.prepare('UPDATE sessions SET step_up_until = NULL WHERE user_id = ?').run(verified.body.user.id);
+  sessionDatabase.close();
 
   const location = await request('/locations', secured({ clientId: client.body.id, name: 'Test Location', address: '', notes: '' }));
   assert.equal(location.response.status, 201);
@@ -127,11 +219,12 @@ try {
   assert.equal(stepUp.response.status, 200);
 
   const renamedOwner = await request(`/users/${verified.body.user.id}`, {
-    ...secured({ name: 'Renamed Automated Owner' }),
+    ...secured({ name: 'Renamed Automated Owner', email: 'renamed-owner@example.invalid' }),
     method: 'PATCH',
   });
   assert.equal(renamedOwner.response.status, 200);
   assert.equal(renamedOwner.body.name, 'Renamed Automated Owner');
+  assert.equal(renamedOwner.body.email, 'renamed-owner@example.invalid');
 
   const reveal = await request(`/credentials/${credential.body.id}/secret`, secured({ purpose: 'reveal' }));
   assert.equal(reveal.response.status, 200);
@@ -148,6 +241,8 @@ try {
   assert.ok(audit.body.some((entry) => entry.event_type === 'credential.reveal'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'export.documentation'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
 
   const sqlite = new Database(databasePath, { readonly: true });
   const stored = sqlite.prepare('SELECT secret_ciphertext FROM credentials WHERE id = ?').get(credential.body.id);
@@ -155,7 +250,7 @@ try {
   assert.equal(stored.secret_ciphertext.includes(testSecret), false);
   sqlite.close();
 
-  console.log('PASS: encrypted credential, MFA, step-up, user rename, safe export, and audit smoke test');
+  console.log('PASS: encryption, MFA, scoped Client Admin users, user editing/removal, safe export, and audit smoke test');
 } finally {
   server.kill('SIGTERM');
   await Promise.race([new Promise((resolve) => server.once('exit', resolve)), delay(3000)]);

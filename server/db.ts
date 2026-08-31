@@ -12,11 +12,16 @@ db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
 db.pragma('synchronous = FULL');
 
-const migrationPath = fileURLToPath(new URL('./migrations/001_initial.sql', import.meta.url));
-const migrationSql = fs.readFileSync(migrationPath, 'utf8');
-
-db.exec(migrationSql);
+const initialMigrationPath = fileURLToPath(new URL('./migrations/001_initial.sql', import.meta.url));
+db.exec(fs.readFileSync(initialMigrationPath, 'utf8'));
 db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(1, new Date().toISOString());
+
+const userColumns = db.pragma('table_info(users)') as Array<{ name: string }>;
+if (!userColumns.some((column) => column.name === 'disabled_at')) {
+  const migrationPath = fileURLToPath(new URL('./migrations/002_user_deactivation.sql', import.meta.url));
+  db.exec(fs.readFileSync(migrationPath, 'utf8'));
+}
+db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(2, new Date().toISOString());
 db.pragma('optimize');
 
 // Vault keys live only in process memory. Restarting the app intentionally invalidates sessions.

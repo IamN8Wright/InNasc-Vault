@@ -20,6 +20,7 @@ import {
   requireCsrf,
   requireStepUp,
   resetUserMfa,
+  revokeUserSessions,
   setupStatus,
 } from './auth.js';
 import { collections, roles, type Collection } from './config.js';
@@ -28,7 +29,9 @@ import { db, newId, nowIso } from './db.js';
 import {
   assertPermission,
   assertWorkspaceAdmin,
+  assignedClientIds,
   hasPermission,
+  manageableClientIds,
   visibleClientIds,
 } from './permissions.js';
 import type { AuthenticatedRequest, UserRow, VaultSecret } from './types.js';
@@ -127,10 +130,16 @@ const userSchema = z.object({
   email: z.string().trim().email().max(254),
   password: strongPassword,
   role: z.enum(roles).refine((role) => role !== 'workspace_owner', 'Only one workspace owner is supported in the local build.'),
+  clientId: z.string().uuid().nullable().optional(),
+  canView: z.boolean().default(true),
+  canManage: z.boolean().default(false),
+  canReveal: z.boolean().default(false),
+  canExport: z.boolean().default(false),
 });
 
-const userNameSchema = z.object({
+const userProfileSchema = z.object({
   name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(254),
 });
 
 const permissionSchema = z.object({
@@ -146,6 +155,48 @@ const permissionSchema = z.object({
 
 function authRequest(request: Request) {
   return request as AuthenticatedRequest;
+}
+
+function workspaceAdmin(user: UserRow) {
+  return user.role === 'workspace_owner' || user.role === 'admin';
+}
+
+function canManageTargetUser(actor: UserRow, target: UserRow) {
+  if (workspaceAdmin(actor)) return target.role !== 'workspace_owner' || actor.role === 'workspace_owner';
+  if (actor.role !== 'client_admin' || target.role !== 'client_user') return false;
+  const manageable = manageableClientIds(actor) ?? [];
+  const assigned = assignedClientIds(target.id);
+  return assigned.length > 0 && assigned.every((clientId) => manageable.includes(clientId));
+}
+
+function assertUserManager(actor: UserRow) {
+  if (!workspaceAdmin(actor) && actor.role !== 'client_admin') {
+    throw Object.assign(new Error('User administration permission is required.'), { status: 403, code: 'PERMISSION_DENIED' });
+  }
+}
+
+function assertCanManageTargetUser(actor: UserRow, target: UserRow) {
+  assertUserManager(actor);
+  if (!canManageTargetUser(actor, target)) {
+    throw Object.assign(new Error('You cannot manage this user or one of their assigned clients.'), { status: 403, code: 'PERMISSION_DENIED' });
+  }
+}
+
+function savePermissionGrant(
+  request: AuthenticatedRequest,
+  input: z.infer<typeof permissionSchema>,
+) {
+  const scopeKey = `${input.clientId ?? '*'}|${input.locationId ?? '*'}|${input.collection ?? '*'}`;
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO permissions(id, user_id, scope_key, client_id, location_id, collection, can_view, can_manage, can_reveal, can_export, created_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, scope_key) DO UPDATE SET
+      can_view=excluded.can_view, can_manage=excluded.can_manage, can_reveal=excluded.can_reveal,
+      can_export=excluded.can_export, updated_at=excluded.updated_at
+  `).run(newId(), input.userId, scopeKey, input.clientId, input.locationId ?? null, input.collection ?? null, input.canView ? 1 : 0, input.canManage ? 1 : 0, input.canReveal ? 1 : 0, input.canExport ? 1 : 0, request.auth.user.id, timestamp, timestamp);
+  audit({ request, actorUserId: request.auth.user.id, eventType: 'permission.change', targetType: 'user', targetId: input.userId, clientId: input.clientId, detail: { scopeKey, canView: input.canView, canManage: input.canManage, canReveal: input.canReveal, canExport: input.canExport } });
+  return scopeKey;
 }
 
 function clientIdsFor(user: UserRow) {
@@ -413,42 +464,102 @@ router.delete('/credentials/:id', requireCsrf, requireStepUp, (request, response
 
 router.get('/users', (request, response) => {
   const auth = authRequest(request);
-  assertWorkspaceAdmin(auth);
-  const users = db.prepare('SELECT id FROM users ORDER BY name').all() as Array<{ id: string }>;
-  response.json(users.map((item) => publicUser(getUserById(item.id)!)));
+  assertUserManager(auth.auth.user);
+  const users = db.prepare('SELECT id FROM users ORDER BY disabled_at IS NOT NULL, name').all() as Array<{ id: string }>;
+  const visibleUsers = users
+    .map((item) => getUserById(item.id)!)
+    .filter((user) => workspaceAdmin(auth.auth.user) || canManageTargetUser(auth.auth.user, user));
+  response.json(visibleUsers.map(publicUser));
 });
 
-router.post('/users', requireCsrf, asyncRoute(async (request, response) => {
+router.post('/users', requireCsrf, requireStepUp, asyncRoute(async (request, response) => {
   const auth = authRequest(request);
-  assertWorkspaceAdmin(auth);
   const input = userSchema.parse(request.body);
-  response.status(201).json(await createManagedUser(auth, input));
+  assertUserManager(auth.auth.user);
+  if (auth.auth.user.role === 'client_admin') {
+    if (input.role !== 'client_user' || !input.clientId) {
+      return response.status(403).json({ error: 'Client Admins may create Client Users only within an assigned client.' });
+    }
+    const manageable = manageableClientIds(auth.auth.user) ?? [];
+    if (!manageable.includes(input.clientId)) return response.status(403).json({ error: 'You cannot add users to this client.' });
+  }
+  if (input.clientId && !db.prepare('SELECT id FROM clients WHERE id = ?').get(input.clientId)) return response.status(400).json({ error: 'Client not found.' });
+  if (input.clientId && auth.auth.user.role === 'client_admin') {
+    const scope = { clientId: input.clientId };
+    for (const [enabled, action] of [[input.canView, 'view'], [input.canManage, 'manage'], [input.canReveal, 'reveal'], [input.canExport, 'export']] as const) {
+      if (enabled && !hasPermission(auth.auth.user, scope, action)) return response.status(403).json({ error: `You cannot grant ${action} access that you do not have.` });
+    }
+  }
+  const created = await createManagedUser(auth, input);
+  if (input.clientId) {
+    savePermissionGrant(auth, {
+      userId: created.id,
+      clientId: input.clientId,
+      locationId: null,
+      collection: null,
+      canView: input.canView,
+      canManage: input.canManage,
+      canReveal: input.canReveal,
+      canExport: input.canExport,
+    });
+  }
+  response.status(201).json(publicUser(getUserById(created.id)!));
 }));
 
 router.patch('/users/:id', requireCsrf, requireStepUp, (request, response) => {
   const auth = authRequest(request);
-  assertWorkspaceAdmin(auth);
   const target = getUserById(String(request.params.id));
   if (!target) return response.status(404).json({ error: 'User not found.' });
-  const input = userNameSchema.parse(request.body);
+  assertCanManageTargetUser(auth.auth.user, target);
+  const input = userProfileSchema.parse(request.body);
+  const duplicate = db.prepare('SELECT id FROM users WHERE email = ? COLLATE NOCASE AND id <> ?').get(input.email, target.id);
+  if (duplicate) return response.status(409).json({ error: 'A user with that email already exists.' });
   const previousName = target.name;
-  db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ?').run(input.name, nowIso(), target.id);
+  const previousEmail = target.email;
+  db.prepare('UPDATE users SET name = ?, email = ?, updated_at = ? WHERE id = ?').run(input.name, input.email.toLowerCase(), nowIso(), target.id);
+  if (previousEmail.toLowerCase() !== input.email.toLowerCase() && target.id !== auth.auth.user.id) revokeUserSessions(target.id);
   audit({
     request,
     actorUserId: auth.auth.user.id,
     eventType: 'user.update',
     targetType: 'user',
     targetId: target.id,
-    detail: { field: 'name', previousName, name: input.name },
+    detail: { fields: ['name', 'email'], previousName, name: input.name, previousEmail, email: input.email.toLowerCase() },
   });
+  return response.json(publicUser(getUserById(target.id)!));
+});
+
+router.delete('/users/:id', requireCsrf, requireStepUp, (request, response) => {
+  const auth = authRequest(request);
+  const target = getUserById(String(request.params.id));
+  if (!target) return response.status(404).json({ error: 'User not found.' });
+  assertCanManageTargetUser(auth.auth.user, target);
+  if (target.id === auth.auth.user.id) return response.status(400).json({ error: 'You cannot remove your own account.' });
+  if (target.role === 'workspace_owner') return response.status(403).json({ error: 'The Workspace Owner cannot be removed.' });
+  if (target.disabled_at) return response.json({ removed: true });
+  resetUserMfa(target, auth.auth.vaultKey);
+  const removedAt = nowIso();
+  db.prepare('UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ?').run(removedAt, removedAt, target.id);
+  audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.remove', targetType: 'user', targetId: target.id, detail: { role: target.role } });
+  return response.json({ removed: true, disabledAt: removedAt });
+});
+
+router.post('/users/:id/restore', requireCsrf, requireStepUp, (request, response) => {
+  const auth = authRequest(request);
+  const target = getUserById(String(request.params.id));
+  if (!target) return response.status(404).json({ error: 'User not found.' });
+  assertCanManageTargetUser(auth.auth.user, target);
+  db.prepare('UPDATE users SET disabled_at = NULL, updated_at = ? WHERE id = ?').run(nowIso(), target.id);
+  audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.restore', targetType: 'user', targetId: target.id, detail: { role: target.role } });
   return response.json(publicUser(getUserById(target.id)!));
 });
 
 router.post('/users/:id/reset-mfa', requireCsrf, requireStepUp, (request, response) => {
   const auth = authRequest(request);
-  assertWorkspaceAdmin(auth);
   const target = getUserById(String(request.params.id));
   if (!target) return response.status(404).json({ error: 'User not found.' });
+  assertCanManageTargetUser(auth.auth.user, target);
+  if (target.disabled_at) return response.status(409).json({ error: 'Restore this user before resetting MFA.' });
   if (target.role === 'workspace_owner' && target.id !== auth.auth.user.id) return response.status(403).json({ error: 'Another administrator cannot reset the workspace owner.' });
   resetUserMfa(target, auth.auth.vaultKey);
   audit({ request, actorUserId: auth.auth.user.id, eventType: 'auth.mfa_reset', targetType: 'user', targetId: target.id });
@@ -457,29 +568,32 @@ router.post('/users/:id/reset-mfa', requireCsrf, requireStepUp, (request, respon
 
 router.get('/permissions', (request, response) => {
   const auth = authRequest(request);
-  assertWorkspaceAdmin(auth);
-  response.json(db.prepare(`SELECT id, user_id, client_id, location_id, collection, can_view, can_manage, can_reveal, can_export, updated_at FROM permissions ORDER BY updated_at DESC`).all());
+  assertUserManager(auth.auth.user);
+  const rows = db.prepare(`SELECT id, user_id, client_id, location_id, collection, can_view, can_manage, can_reveal, can_export, updated_at FROM permissions ORDER BY updated_at DESC`).all() as Array<{ user_id: string; client_id: string | null }>;
+  if (workspaceAdmin(auth.auth.user)) return response.json(rows);
+  const manageable = manageableClientIds(auth.auth.user) ?? [];
+  return response.json(rows.filter((row) => row.client_id && manageable.includes(row.client_id) && canManageTargetUser(auth.auth.user, getUserById(row.user_id)!)));
 });
 
 router.post('/permissions', requireCsrf, requireStepUp, (request, response) => {
   const auth = authRequest(request);
-  assertWorkspaceAdmin(auth);
   const input = permissionSchema.parse(request.body);
   const target = getUserById(input.userId);
   if (!target) return response.status(404).json({ error: 'User not found.' });
+  assertUserManager(auth.auth.user);
+  if (!workspaceAdmin(auth.auth.user)) {
+    assertCanManageTargetUser(auth.auth.user, target);
+    const manageable = manageableClientIds(auth.auth.user) ?? [];
+    if (!input.clientId || !manageable.includes(input.clientId)) return response.status(403).json({ error: 'You cannot manage permissions for this client.' });
+    const scope = { clientId: input.clientId, locationId: input.locationId, collection: input.collection };
+    for (const [enabled, action] of [[input.canView, 'view'], [input.canManage, 'manage'], [input.canReveal, 'reveal'], [input.canExport, 'export']] as const) {
+      if (enabled && !hasPermission(auth.auth.user, scope, action)) return response.status(403).json({ error: `You cannot grant ${action} access that you do not have.` });
+    }
+  }
   if (input.locationId && !input.clientId) return response.status(400).json({ error: 'A location permission must include its client.' });
   if (input.clientId && !db.prepare('SELECT id FROM clients WHERE id = ?').get(input.clientId)) return response.status(400).json({ error: 'Client not found.' });
   if (input.locationId) assertLocation(input.clientId!, input.locationId);
-  const scopeKey = `${input.clientId ?? '*'}|${input.locationId ?? '*'}|${input.collection ?? '*'}`;
-  const timestamp = nowIso();
-  db.prepare(`
-    INSERT INTO permissions(id, user_id, scope_key, client_id, location_id, collection, can_view, can_manage, can_reveal, can_export, created_by, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(user_id, scope_key) DO UPDATE SET
-      can_view=excluded.can_view, can_manage=excluded.can_manage, can_reveal=excluded.can_reveal,
-      can_export=excluded.can_export, updated_at=excluded.updated_at
-  `).run(newId(), input.userId, scopeKey, input.clientId, input.locationId ?? null, input.collection ?? null, input.canView ? 1 : 0, input.canManage ? 1 : 0, input.canReveal ? 1 : 0, input.canExport ? 1 : 0, auth.auth.user.id, timestamp, timestamp);
-  audit({ request, actorUserId: auth.auth.user.id, eventType: 'permission.change', targetType: 'user', targetId: input.userId, clientId: input.clientId, detail: { scopeKey, canView: input.canView, canManage: input.canManage, canReveal: input.canReveal, canExport: input.canExport } });
+  const scopeKey = savePermissionGrant(auth, input);
   return response.json({ saved: true, scopeKey });
 });
 

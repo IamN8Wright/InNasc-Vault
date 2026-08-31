@@ -9,6 +9,7 @@ export const config = {
   uiPort,
   host: '127.0.0.1',
   origin: `http://localhost:${uiPort}`,
+  allowedOrigins: [`http://localhost:${uiPort}`, `http://127.0.0.1:${uiPort}`] as string[],
   rpID: 'localhost',
   rpName: 'InNasc Vault',
   dataDir: path.resolve(process.env.INNASC_DATA_DIR ?? path.join(appRoot, 'data')),

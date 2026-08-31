@@ -58,6 +58,10 @@ export async function ensureHostedSchema() {
   const activeDatabase = hostedDatabase();
   activeDatabase.transaction(() => {
     for (const statement of hostedSchemaStatements) activeDatabase.exec(statement);
+    const userColumns = activeDatabase.pragma('table_info(users)') as Array<{ name: string }>;
+    if (!userColumns.some((column) => column.name === 'disabled_at')) {
+      activeDatabase.exec('ALTER TABLE users ADD COLUMN disabled_at TEXT');
+    }
   })();
   schemaReady = true;
 }

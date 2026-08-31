@@ -16,6 +16,7 @@ export type UserRow = {
   mfa_enabled: number;
   failed_login_count: number;
   locked_until: string | null;
+  disabled_at: string | null;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;

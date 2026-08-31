@@ -1,8 +1,8 @@
 function apiRoot() {
   if (typeof window === 'undefined') return '/api';
-  return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'http://localhost:3778/api'
-    : '/api';
+  if (window.location.hostname === 'localhost') return 'http://localhost:3778/api';
+  if (window.location.hostname === '127.0.0.1') return 'http://127.0.0.1:3778/api';
+  return '/api';
 }
 
 export class ApiError extends Error {

@@ -35,7 +35,7 @@ const dummyHashPromise = hashPassword(`not-a-user-${randomBase64Url(16)}`);
 const userSelect = `
   SELECT id, name, email, role, password_hash, kdf_salt, wrapped_key_nonce,
     wrapped_key_ciphertext, mfa_secret_nonce, mfa_secret_ciphertext,
-    mfa_enabled, failed_login_count, locked_until, last_login_at, created_at, updated_at
+    mfa_enabled, failed_login_count, locked_until, disabled_at, last_login_at, created_at, updated_at
   FROM users
 `;
 
@@ -192,6 +192,7 @@ function createSession(request: Request, response: Response, user: UserRow, vaul
 export function publicUser(user: UserRow) {
   const recoveryRemaining = (db.prepare('SELECT COUNT(*) AS count FROM recovery_codes WHERE user_id = ? AND used_at IS NULL').get(user.id) as { count: number }).count;
   const passkeyCount = (db.prepare('SELECT COUNT(*) AS count FROM passkeys WHERE user_id = ?').get(user.id) as { count: number }).count;
+  const clientIds = (db.prepare('SELECT DISTINCT client_id FROM permissions WHERE user_id = ? AND client_id IS NOT NULL ORDER BY client_id').all(user.id) as Array<{ client_id: string }>).map((row) => row.client_id);
   return {
     id: user.id,
     name: user.name,
@@ -200,6 +201,8 @@ export function publicUser(user: UserRow) {
     mfaEnabled: Boolean(user.mfa_enabled),
     recoveryCodesRemaining: recoveryRemaining,
     passkeyCount,
+    clientIds,
+    disabledAt: user.disabled_at,
     lastLoginAt: user.last_login_at,
   };
 }
@@ -311,6 +314,11 @@ export async function beginLogin(request: Request, email: string, password: stri
     throw Object.assign(new Error('Email, password, or MFA code was not accepted.'), { status: 401 });
   }
 
+  if (user.disabled_at) {
+    audit({ request, actorUserId: user.id, eventType: 'auth.sign_in', targetType: 'user', targetId: user.id, outcome: 'blocked', detail: { reason: 'account_removed' } });
+    throw Object.assign(new Error('This account has been removed. Contact an administrator.'), { status: 403, code: 'ACCOUNT_REMOVED' });
+  }
+
   if (user.locked_until && Date.parse(user.locked_until) > Date.now()) {
     audit({ request, actorUserId: user.id, eventType: 'auth.sign_in', targetType: 'user', targetId: user.id, outcome: 'blocked', detail: { reason: 'rate_limited' } });
     throw Object.assign(new Error('This account is temporarily locked. Try again later.'), { status: 429 });
@@ -390,7 +398,12 @@ export function requireAuth(request: Request, response: Response, next: NextFunc
     return response.status(401).json({ error: 'Your secure session ended. Sign in again.', code: 'AUTH_REQUIRED' });
   }
   const user = getUserById(session.user_id);
-  if (!user) return response.status(401).json({ error: 'Sign in required.', code: 'AUTH_REQUIRED' });
+  if (!user || user.disabled_at) {
+    db.prepare('DELETE FROM sessions WHERE id_hash = ?').run(idHash);
+    unlockedSessionKeys.delete(idHash);
+    clearSessionCookie(response);
+    return response.status(401).json({ error: 'This account no longer has access.', code: 'AUTH_REQUIRED' });
+  }
   db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?').run(nowIso(), idHash);
   (request as AuthenticatedRequest).auth = { session, user, vaultKey };
   return next();
@@ -457,8 +470,20 @@ export function resetUserMfa(targetUser: UserRow, vaultKey: Uint8Array) {
     const sessions = db.prepare('SELECT id_hash FROM sessions WHERE user_id = ?').all(targetUser.id) as Array<{ id_hash: string }>;
     db.prepare('DELETE FROM sessions WHERE user_id = ?').run(targetUser.id);
     for (const session of sessions) unlockedSessionKeys.delete(session.id_hash);
+    for (const [id, challenge] of challenges) {
+      if (challenge.userId === targetUser.id) challenges.delete(id);
+    }
   });
   reset();
+}
+
+export function revokeUserSessions(userId: string) {
+  const sessions = db.prepare('SELECT id_hash FROM sessions WHERE user_id = ?').all(userId) as Array<{ id_hash: string }>;
+  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+  for (const session of sessions) unlockedSessionKeys.delete(session.id_hash);
+  for (const [id, challenge] of challenges) {
+    if (challenge.userId === userId) challenges.delete(id);
+  }
 }
 
 export function storeUnlockedSessionKey(sessionHash: string, vaultKey: Uint8Array) {
