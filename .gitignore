@@ -36,6 +36,7 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+*.tsbuildinfo
 
 # local vault data and generated launcher state
 /data/
