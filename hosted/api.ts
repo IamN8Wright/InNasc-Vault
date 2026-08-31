@@ -335,6 +335,8 @@ async function beginSetup(request: Request) {
     await audit(request, { eventType: 'auth.setup', targetType: 'workspace', outcome: 'failure', detail: { reason: 'invalid_setup_token' } });
     throw new ApiProblem('The deployment setup key is not valid.', 403, 'SETUP_TOKEN_INVALID');
   }
+  // Fail before inserting the owner if the deployment key cannot protect login challenges.
+  serverKey();
   const userId = newId();
   const vaultKey = randomBytes(32);
   const salt = base64Url(randomBytes(16));
@@ -689,9 +691,9 @@ export async function handleHostedApi(request: Request) {
       const count = await first<{ count: number }>('SELECT COUNT(*) AS count FROM users');
       return json({ setupRequired: (count?.count ?? 0) === 0, setupTokenRequired: true });
     }
-    if (path === 'setup/start' && method === 'POST') return beginSetup(request);
-    if (path === 'auth/login' && method === 'POST') return beginLogin(request);
-    if (path === 'auth/mfa/verify' && method === 'POST') return completeMfa(request);
+    if (path === 'setup/start' && method === 'POST') return await beginSetup(request);
+    if (path === 'auth/login' && method === 'POST') return await beginLogin(request);
+    if (path === 'auth/mfa/verify' && method === 'POST') return await completeMfa(request);
     if ((path === 'auth/passkey/options' || path === 'auth/passkey/verify') && method === 'POST') throw new ApiProblem('Hosted passkey sign-in is not enabled in this beta.', 501, 'HOSTED_PASSKEYS_PENDING');
     const auth = await requireAuth(request);
     return await handleProtected(request, path, method, auth);

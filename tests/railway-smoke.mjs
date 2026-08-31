@@ -71,6 +71,15 @@ try {
   assert.equal(status.body.setupRequired, true);
   assert.equal(status.body.setupTokenRequired, true);
 
+  const rejectedSetup = await request('/setup/start', {
+    method: 'POST',
+    body: { name: 'Rejected Owner', email: 'rejected-owner@example.invalid', password, setupToken: 'invalid-setup-token' },
+  });
+  assert.equal(rejectedSetup.response.status, 403);
+  assert.equal(rejectedSetup.body.code, 'SETUP_TOKEN_INVALID');
+  const statusAfterRejectedSetup = await request('/setup/status');
+  assert.equal(statusAfterRejectedSetup.body.setupRequired, true);
+
   const setup = await request('/setup/start', {
     method: 'POST',
     body: { name: 'Automated Railway Owner', email: 'railway-owner@example.invalid', password, setupToken },
