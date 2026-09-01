@@ -86,25 +86,23 @@ Deploy the repository as a single Node 22 web service. Railway installs the lock
 
 1. Attach a persistent Railway volume to the service. The application uses Railway's `RAILWAY_VOLUME_MOUNT_PATH` automatically and creates `innasc-vault-hosted.sqlite3` there.
 2. Set `INNASC_SERVER_KEY` to a random 32-byte base64url value and `INNASC_SETUP_TOKEN` to a separate high-entropy one-time setup value. Keep both secret and never commit them.
-3. Add the SMTP variables below as private Railway variables. Until these are present, users can still be created, but the interface clearly marks the welcome email as pending.
+3. Add the Resend variables below as private Railway variables. Until these are present, users can still be created, but the interface clearly marks the welcome email as pending.
 4. Keep the service at one replica while it uses SQLite.
 5. Configure `/api/health` as the health check, attach the custom domain, and verify Railway volume backups before storing important data.
 
-### Welcome email configuration
+### Welcome email configuration with Resend
 
-Use a dedicated transactional-email or business-mail SMTP account. Put these values only in Railway **Variables** (or Windows environment variables for the local build), never in GitHub:
+Verify `innasc.com` in Resend using the exact SPF, DKIM, and MX records shown in its Domains dashboard. Create a sending-only API key, then put these values only in Railway **Variables** (or Windows environment variables for the local build), never in GitHub:
 
 ```text
-INNASC_SMTP_HOST=smtp.example.com
-INNASC_SMTP_PORT=587
-INNASC_SMTP_SECURE=false
-INNASC_SMTP_USER=your-smtp-username
-INNASC_SMTP_PASSWORD=your-smtp-password
-INNASC_SMTP_FROM=InNasc Vault <vault@innasc.com>
+INNASC_RESEND_API_KEY=re_replace_with_private_sending_key
+INNASC_EMAIL_FROM=InNasc Vault <welcome@innasc.com>
 INNASC_APP_URL=https://vault.innasc.com
 ```
 
-Use port `465` with `INNASC_SMTP_SECURE=true` for implicit TLS, or port `587` with `false` for mandatory STARTTLS. If the SMTP relay does not use authentication, omit both `INNASC_SMTP_USER` and `INNASC_SMTP_PASSWORD` and set `INNASC_SMTP_FROM`. Restart or redeploy after changing variables.
+The application uses Resend’s HTTPS API, which works on Railway plans where outbound SMTP is unavailable. Resend takes precedence when both Resend and legacy SMTP variables are configured. Restart or redeploy after changing variables.
+
+SMTP remains available as a fallback for local deployments and Railway Pro plans. Configure `INNASC_SMTP_HOST`, `INNASC_SMTP_PORT`, `INNASC_SMTP_SECURE`, `INNASC_SMTP_USER`, `INNASC_SMTP_PASSWORD`, and `INNASC_SMTP_FROM` only when an SMTP provider is intentionally used.
 
 Creating a user attempts delivery immediately. **Resend welcome** generates and stores a new password hash and key wrapping, revokes that user’s sessions, invalidates the earlier temporary password, and sends only the new temporary password. The plaintext value is never stored in SQLite, audit records, or source code.
 

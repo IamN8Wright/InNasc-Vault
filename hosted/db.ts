@@ -26,6 +26,8 @@ type HostedEnvironment = {
   INNASC_SMTP_USER?: string;
   INNASC_SMTP_PASSWORD?: string;
   INNASC_SMTP_FROM?: string;
+  INNASC_RESEND_API_KEY?: string;
+  INNASC_EMAIL_FROM?: string;
   INNASC_APP_URL?: string;
 };
 
@@ -42,6 +44,8 @@ export function hostedEnv(): HostedEnvironment {
     INNASC_SMTP_USER: process.env.INNASC_SMTP_USER,
     INNASC_SMTP_PASSWORD: process.env.INNASC_SMTP_PASSWORD,
     INNASC_SMTP_FROM: process.env.INNASC_SMTP_FROM,
+    INNASC_RESEND_API_KEY: process.env.INNASC_RESEND_API_KEY,
+    INNASC_EMAIL_FROM: process.env.INNASC_EMAIL_FROM,
     INNASC_APP_URL: process.env.INNASC_APP_URL,
   };
 }

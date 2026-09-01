@@ -34,36 +34,34 @@ function smtpSettings() {
   };
 }
 
+function resendSettings() {
+  const environment = hostedEnv();
+  const apiKey = environment.INNASC_RESEND_API_KEY?.trim();
+  const from = environment.INNASC_EMAIL_FROM?.trim();
+  if (!apiKey || !from) return null;
+  return { apiKey, from, appUrl: environment.INNASC_APP_URL?.trim() || 'https://vault.innasc.com' };
+}
+
 function escapeHtml(value: string) {
   return value.replace(/[&<>'"]/gu, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]!);
 }
 
 export function welcomeEmailConfigured() {
-  return Boolean(smtpSettings());
+  return Boolean(resendSettings() || smtpSettings());
 }
 
 export async function sendWelcomeEmail(message: WelcomeMessage): Promise<WelcomeEmailResult> {
-  const settings = smtpSettings();
-  if (!settings) return { configured: false, sent: false };
-
-  const transporter = nodemailer.createTransport({
-    host: settings.host,
-    port: settings.port,
-    secure: settings.secure,
-    requireTLS: !settings.secure,
-    auth: settings.user ? { user: settings.user, pass: settings.password! } : undefined,
-    tls: { minVersion: 'TLSv1.2' },
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 20_000,
-  });
+  const resend = resendSettings();
+  const smtp = smtpSettings();
+  if (!resend && !smtp) return { configured: false, sent: false };
+  const appUrl = resend?.appUrl ?? smtp!.appUrl;
   const mfaStep = message.mfaAlreadyEnrolled
     ? 'Confirm sign-in with your existing authenticator code.'
     : 'Enroll an authenticator app when prompted and save the recovery codes.';
   const text = [
     `Welcome to InNasc Vault, ${message.name}.`,
     '',
-    `Sign in: ${settings.appUrl}`,
+    `Sign in: ${appUrl}`,
     `Email: ${message.email}`,
     `Temporary password: ${message.temporaryPassword}`,
     '',
@@ -74,10 +72,34 @@ export async function sendWelcomeEmail(message: WelcomeMessage): Promise<Welcome
     '',
     'This temporary password stops working when an administrator resends this welcome email. Do not forward this message.',
   ].join('\n');
-  const html = `<div style="font-family:Arial,sans-serif;line-height:1.55;color:#102033;max-width:620px"><h1 style="color:#1557d6">Welcome to InNasc Vault</h1><p>Hello ${escapeHtml(message.name)},</p><p>Your secure workspace account is ready.</p><div style="background:#f3f7ff;border:1px solid #c8d8f4;border-radius:10px;padding:18px"><p><strong>Sign in:</strong> <a href="${escapeHtml(settings.appUrl)}">${escapeHtml(settings.appUrl)}</a><br><strong>Email:</strong> ${escapeHtml(message.email)}<br><strong>Temporary password:</strong> <code style="font-size:15px">${escapeHtml(message.temporaryPassword)}</code></p></div><h2 style="font-size:18px">Complete your secure setup</h2><ol><li>Sign in with the email and temporary password above.</li><li>${escapeHtml(mfaStep)}</li><li>Create a new private password before the vault opens.</li></ol><p style="color:#5d6673;font-size:13px">This temporary password stops working when an administrator resends this welcome email. Do not forward this message.</p></div>`;
+  const html = `<div style="font-family:Arial,sans-serif;line-height:1.55;color:#102033;max-width:620px"><h1 style="color:#1557d6">Welcome to InNasc Vault</h1><p>Hello ${escapeHtml(message.name)},</p><p>Your secure workspace account is ready.</p><div style="background:#f3f7ff;border:1px solid #c8d8f4;border-radius:10px;padding:18px"><p><strong>Sign in:</strong> <a href="${escapeHtml(appUrl)}">${escapeHtml(appUrl)}</a><br><strong>Email:</strong> ${escapeHtml(message.email)}<br><strong>Temporary password:</strong> <code style="font-size:15px">${escapeHtml(message.temporaryPassword)}</code></p></div><h2 style="font-size:18px">Complete your secure setup</h2><ol><li>Sign in with the email and temporary password above.</li><li>${escapeHtml(mfaStep)}</li><li>Create a new private password before the vault opens.</li></ol><p style="color:#5d6673;font-size:13px">This temporary password stops working when an administrator resends this welcome email. Do not forward this message.</p></div>`;
 
   try {
-    await transporter.sendMail({ from: settings.from, to: message.email, subject: 'Welcome to InNasc Vault', text, html });
+    if (resend) {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resend.apiKey}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `innasc-welcome-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({ from: resend.from, to: [message.email], subject: 'Welcome to InNasc Vault', text, html }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      return { configured: true, sent: response.ok };
+    }
+    const transporter = nodemailer.createTransport({
+      host: smtp!.host,
+      port: smtp!.port,
+      secure: smtp!.secure,
+      requireTLS: !smtp!.secure,
+      auth: smtp!.user ? { user: smtp!.user, pass: smtp!.password! } : undefined,
+      tls: { minVersion: 'TLSv1.2' },
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
+    });
+    await transporter.sendMail({ from: smtp!.from, to: message.email, subject: 'Welcome to InNasc Vault', text, html });
     return { configured: true, sent: true };
   } catch {
     return { configured: true, sent: false };

@@ -532,7 +532,7 @@ router.post('/users', requireCsrf, requireStepUp, asyncRoute(async (request, res
     targetType: 'user',
     targetId: created.id,
     outcome: welcomeEmail.sent ? 'success' : welcomeEmail.configured ? 'failure' : 'blocked',
-    detail: { reason: welcomeEmail.sent ? 'sent' : welcomeEmail.configured ? 'delivery_failed' : 'smtp_not_configured' },
+    detail: { reason: welcomeEmail.sent ? 'sent' : welcomeEmail.configured ? 'delivery_failed' : 'email_provider_not_configured' },
   });
   response.status(201).json({ ...publicUser(getUserById(created.id)!), welcomeEmail });
 }));
@@ -545,8 +545,8 @@ router.post('/users/:id/resend-welcome', requireCsrf, requireStepUp, asyncRoute(
   if (target.disabled_at) return response.status(409).json({ error: 'Restore this user before resending the welcome email.' });
   if (!target.must_change_password) return response.status(409).json({ error: 'This user has completed onboarding. Use a password-reset workflow instead.', code: 'ONBOARDING_COMPLETE' });
   if (!welcomeEmailConfigured()) {
-    audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'smtp_not_configured', resend: true } });
-    return response.status(503).json({ error: 'Welcome email is not configured. Add the SMTP settings, then try again.', code: 'EMAIL_NOT_CONFIGURED' });
+    audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'email_provider_not_configured', resend: true } });
+    return response.status(503).json({ error: 'Welcome email is not configured. Add the Resend API settings, then try again.', code: 'EMAIL_NOT_CONFIGURED' });
   }
 
   const temporaryPassword = makeTemporaryPassword();
@@ -554,7 +554,7 @@ router.post('/users/:id/resend-welcome', requireCsrf, requireStepUp, asyncRoute(
   const welcomeEmail = await sendWelcomeEmail({ name: target.name, email: target.email, temporaryPassword, mfaAlreadyEnrolled: Boolean(target.mfa_enabled) });
   if (!welcomeEmail.sent) {
     audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'failure', detail: { reason: 'delivery_failed', resend: true, passwordRotated: true } });
-    return response.status(502).json({ error: 'The temporary password was rotated, but email delivery failed. Check SMTP and resend again.', code: 'EMAIL_DELIVERY_FAILED' });
+    return response.status(502).json({ error: 'The temporary password was rotated, but email delivery failed. Check the email provider and resend again.', code: 'EMAIL_DELIVERY_FAILED' });
   }
   const sentAt = nowIso();
   db.prepare('UPDATE users SET welcome_sent_at = ?, welcome_send_count = welcome_send_count + 1, updated_at = ? WHERE id = ?').run(sentAt, sentAt, target.id);

@@ -16,7 +16,7 @@
     "start:api": "node dist/local-server/index.js",
     "start:railway": "vinext start",
     "check": "tsc --noEmit && tsc -p server/tsconfig.json --noEmit && npm run lint",
-    "test": "npm run build:api && node tests/api-smoke.mjs",
+    "test": "npm run build:api && node tests/email-provider-smoke.mjs && node tests/api-smoke.mjs",
     "test:railway": "npm run build && node tests/railway-smoke.mjs",
     "lint": "oxlint app lib server",
     "format": "oxfmt"

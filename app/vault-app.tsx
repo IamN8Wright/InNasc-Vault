@@ -882,8 +882,8 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
       showNotice(created.welcomeEmail.sent
         ? `Welcome email sent to ${created.email}. MFA enrollment and a new password are required.`
         : created.welcomeEmail.configured
-          ? 'User created, but email delivery failed. Check SMTP and use Resend welcome.'
-          : 'User created. Configure SMTP, then use Resend welcome to deliver a new temporary password.');
+          ? 'User created, but email delivery failed. Check Resend and use Resend welcome.'
+          : 'User created. Configure Resend, then use Resend welcome to deliver a new temporary password.');
       await refresh();
     });
   }

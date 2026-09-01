@@ -733,7 +733,7 @@ async function handleProtected(request: Request, path: string, method: string, a
     if (input.clientId) await savePermissionGrant(request, auth, { userId, clientId: input.clientId, locationId: null, collection: null, canView: input.canView, canManage: input.canManage, canReveal: input.canReveal, canExport: input.canExport });
     const welcomeEmail = await sendWelcomeEmail({ name: input.name, email: input.email.toLowerCase(), temporaryPassword: input.password, mfaAlreadyEnrolled: false });
     if (welcomeEmail.sent) await run('UPDATE users SET welcome_sent_at=?,welcome_send_count=welcome_send_count+1,updated_at=? WHERE id=?', nowIso(), nowIso(), userId);
-    await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: userId, outcome: welcomeEmail.sent ? 'success' : welcomeEmail.configured ? 'failure' : 'blocked', detail: { reason: welcomeEmail.sent ? 'sent' : welcomeEmail.configured ? 'delivery_failed' : 'smtp_not_configured' } });
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: userId, outcome: welcomeEmail.sent ? 'success' : welcomeEmail.configured ? 'failure' : 'blocked', detail: { reason: welcomeEmail.sent ? 'sent' : welcomeEmail.configured ? 'delivery_failed' : 'email_provider_not_configured' } });
     return json({ ...(await publicUser((await getUserById(userId))!)), welcomeEmail }, 201);
   }
   const resendWelcomeMatch = path.match(/^users\/([0-9a-f-]+)\/resend-welcome$/u);
@@ -744,15 +744,15 @@ async function handleProtected(request: Request, path: string, method: string, a
     if (target.disabled_at) throw new ApiProblem('Restore this user before resending the welcome email.', 409);
     if (!target.must_change_password) throw new ApiProblem('This user has completed onboarding. Use a password-reset workflow instead.', 409, 'ONBOARDING_COMPLETE');
     if (!welcomeEmailConfigured()) {
-      await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'smtp_not_configured', resend: true } });
-      throw new ApiProblem('Welcome email is not configured. Add the SMTP settings, then try again.', 503, 'EMAIL_NOT_CONFIGURED');
+      await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'email_provider_not_configured', resend: true } });
+      throw new ApiProblem('Welcome email is not configured. Add the Resend API settings, then try again.', 503, 'EMAIL_NOT_CONFIGURED');
     }
     const temporaryPassword = `Nv!9${randomToken(24)}`;
     await rotateHostedTemporaryPassword(target, auth.vaultKey, temporaryPassword);
     const welcomeEmail = await sendWelcomeEmail({ name: target.name, email: target.email, temporaryPassword, mfaAlreadyEnrolled: Boolean(target.mfa_enabled) });
     if (!welcomeEmail.sent) {
       await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'failure', detail: { reason: 'delivery_failed', resend: true, passwordRotated: true } });
-      throw new ApiProblem('The temporary password was rotated, but email delivery failed. Check SMTP and resend again.', 502, 'EMAIL_DELIVERY_FAILED');
+      throw new ApiProblem('The temporary password was rotated, but email delivery failed. Check the email provider and resend again.', 502, 'EMAIL_DELIVERY_FAILED');
     }
     const sentAt = nowIso();
     await run('UPDATE users SET welcome_sent_at=?,welcome_send_count=welcome_send_count+1,updated_at=? WHERE id=?', sentAt, sentAt, target.id);
