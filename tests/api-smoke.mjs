@@ -229,6 +229,30 @@ try {
   const stepUp = await request('/auth/step-up', secured({ code: stepUpToken }));
   assert.equal(stepUp.response.status, 200);
 
+  const demotedAdmin = await request(`/users/${clientAdmin.body.id}`, {
+    ...secured({ name: 'Automated Client Admin', email: 'client-admin@example.invalid', role: 'client_user', clientId: client.body.id }),
+    method: 'PATCH',
+  });
+  assert.equal(demotedAdmin.response.status, 200);
+  assert.equal(demotedAdmin.body.role, 'client_user');
+  assert.deepEqual(demotedAdmin.body.clientIds, [client.body.id]);
+
+  const removedMistake = await request(`/users/${clientUser.body.id}`, { ...secured({}), method: 'DELETE' });
+  assert.equal(removedMistake.response.status, 200);
+  const rejectedPermanentDelete = await request(`/users/${clientUser.body.id}/permanent`, { ...secured({ confirmation: 'wrong@example.invalid' }), method: 'DELETE' });
+  assert.equal(rejectedPermanentDelete.response.status, 400);
+  const permanentlyDeleted = await request(`/users/${clientUser.body.id}/permanent`, { ...secured({ confirmation: 'updated-client-user@example.invalid' }), method: 'DELETE' });
+  assert.equal(permanentlyDeleted.response.status, 200);
+  assert.equal(permanentlyDeleted.body.deleted, true);
+  const usersAfterPermanentDelete = await request('/users');
+  assert.equal(usersAfterPermanentDelete.body.some((user) => user.id === clientUser.body.id), false);
+  const tombstoneDatabase = new Database(databasePath, { readonly: true });
+  const tombstone = tombstoneDatabase.prepare('SELECT name,email,permanently_deleted_at FROM users WHERE id=?').get(clientUser.body.id);
+  assert.equal(tombstone.name, 'Deleted user');
+  assert.ok(tombstone.email.endsWith('@innasc.invalid'));
+  assert.ok(tombstone.permanently_deleted_at);
+  tombstoneDatabase.close();
+
   const existingUserWelcome = await request(`/users/${clientAdmin.body.id}/resend-welcome`, secured({}));
   assert.equal(existingUserWelcome.response.status, 503);
   assert.equal(existingUserWelcome.body.code, 'EMAIL_NOT_CONFIGURED');
@@ -258,6 +282,7 @@ try {
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.permanent_delete'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.welcome_email'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'auth.temporary_password_changed'));
 

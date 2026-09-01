@@ -29,6 +29,12 @@ for (const [index, column] of ['must_change_password', 'welcome_sent_at', 'welco
   if (!onboardingColumns.some((existing) => existing.name === column)) db.exec(`${onboardingStatements[index]};`);
 }
 db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(3, new Date().toISOString());
+const permanentDeletionColumns = db.pragma('table_info(users)') as Array<{ name: string }>;
+if (!permanentDeletionColumns.some((column) => column.name === 'permanently_deleted_at')) {
+  const migrationPath = fileURLToPath(new URL('./migrations/004_user_permanent_deletion.sql', import.meta.url));
+  db.exec(fs.readFileSync(migrationPath, 'utf8'));
+}
+db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(4, new Date().toISOString());
 db.pragma('optimize');
 
 // Vault keys live only in process memory. Restarting the app intentionally invalidates sessions.

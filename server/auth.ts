@@ -35,7 +35,7 @@ const dummyHashPromise = hashPassword(`not-a-user-${randomBase64Url(16)}`);
 const userSelect = `
   SELECT id, name, email, role, password_hash, kdf_salt, wrapped_key_nonce,
     wrapped_key_ciphertext, mfa_secret_nonce, mfa_secret_ciphertext,
-    mfa_enabled, failed_login_count, locked_until, disabled_at, must_change_password,
+    mfa_enabled, failed_login_count, locked_until, disabled_at, permanently_deleted_at, must_change_password,
     welcome_sent_at, welcome_send_count, last_login_at, created_at, updated_at
   FROM users
 `;
@@ -48,11 +48,11 @@ function pruneChallenges() {
 }
 
 function getUserByEmail(email: string) {
-  return db.prepare(`${userSelect} WHERE email = ? COLLATE NOCASE`).get(email) as UserRow | undefined;
+  return db.prepare(`${userSelect} WHERE email = ? COLLATE NOCASE AND permanently_deleted_at IS NULL`).get(email) as UserRow | undefined;
 }
 
 export function getUserById(id: string) {
-  return db.prepare(`${userSelect} WHERE id = ?`).get(id) as UserRow | undefined;
+  return db.prepare(`${userSelect} WHERE id = ? AND permanently_deleted_at IS NULL`).get(id) as UserRow | undefined;
 }
 
 function wrapVaultKey(userId: string, vaultKey: Uint8Array, derivedKey: Uint8Array) {

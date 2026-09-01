@@ -89,6 +89,9 @@ export async function ensureHostedSchema() {
     if (!userColumns.some((column) => column.name === 'welcome_send_count')) {
       activeDatabase.exec('ALTER TABLE users ADD COLUMN welcome_send_count INTEGER NOT NULL DEFAULT 0');
     }
+    if (!userColumns.some((column) => column.name === 'permanently_deleted_at')) {
+      activeDatabase.exec('ALTER TABLE users ADD COLUMN permanently_deleted_at TEXT');
+    }
   })();
   schemaReady = true;
 }

@@ -175,6 +175,27 @@ try {
   cookie = ownerCookie;
   csrfToken = ownerCsrfToken;
 
+  const hostedAdminPassword = `A!a1${crypto.randomBytes(18).toString('base64url')}`;
+  const hostedAdmin = await request('/users', {
+    method: 'POST',
+    body: { name: 'Mistaken Hosted Admin', email: 'mistaken-hosted-admin@example.invalid', password: hostedAdminPassword, role: 'admin', clientId: null, canView: false, canManage: false, canReveal: false, canExport: false },
+    csrf: true,
+  });
+  assert.equal(hostedAdmin.response.status, 201);
+  const demotedHostedAdmin = await request(`/users/${hostedAdmin.body.id}`, {
+    method: 'PATCH',
+    body: { name: hostedAdmin.body.name, email: hostedAdmin.body.email, role: 'client_user', clientId: client.body.id },
+    csrf: true,
+  });
+  assert.equal(demotedHostedAdmin.response.status, 200);
+  assert.equal(demotedHostedAdmin.body.role, 'client_user');
+  assert.deepEqual(demotedHostedAdmin.body.clientIds, [client.body.id]);
+  const removedHostedMistake = await request(`/users/${hostedAdmin.body.id}`, { method: 'DELETE', body: {}, csrf: true });
+  assert.equal(removedHostedMistake.response.status, 200);
+  const deletedHostedMistake = await request(`/users/${hostedAdmin.body.id}/permanent`, { method: 'DELETE', body: { confirmation: hostedAdmin.body.email }, csrf: true });
+  assert.equal(deletedHostedMistake.response.status, 200);
+  assert.equal(deletedHostedMistake.body.deleted, true);
+
   const existingHostedUserWelcome = await request(`/users/${hostedClientUser.body.id}/resend-welcome`, { method: 'POST', body: {}, csrf: true });
   assert.equal(existingHostedUserWelcome.response.status, 503);
   assert.equal(existingHostedUserWelcome.body.code, 'EMAIL_NOT_CONFIGURED');
@@ -285,6 +306,7 @@ try {
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.permanent_delete'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.welcome_email'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'auth.temporary_password_changed'));
 

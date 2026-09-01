@@ -38,7 +38,8 @@ try {
     {
       path: 'https://vault.innasc.com/innasc-vault-mark.png',
       filename: 'innasc-vault-mark.png',
-      contentId: 'innasc-vault-logo',
+      content_id: 'innasc-vault-logo',
+      content_type: 'image/png',
     },
   ]);
   console.log('PASS: Resend HTTPS welcome-email provider and secure configuration smoke test');

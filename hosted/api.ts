@@ -45,6 +45,7 @@ type UserRow = {
   failed_login_count: number;
   locked_until: string | null;
   disabled_at: string | null;
+  permanently_deleted_at: string | null;
   must_change_password: number;
   welcome_sent_at: string | null;
   welcome_send_count: number;
@@ -139,7 +140,13 @@ const userSchema = z.object({
   canReveal: z.boolean().default(false),
   canExport: z.boolean().default(false),
 });
-const userProfileSchema = z.object({ name: z.string().trim().min(2).max(120), email: z.string().trim().email().max(254) });
+const userProfileSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(254),
+  role: z.enum(roles).refine((role) => role !== 'workspace_owner').optional(),
+  clientId: z.string().uuid().nullable().optional(),
+});
+const permanentDeleteUserSchema = z.object({ confirmation: z.string().trim().max(254) });
 const permissionSchema = z.object({
   userId: z.string().uuid(),
   clientId: z.string().uuid().nullable(),
@@ -195,7 +202,7 @@ async function requestIpHash(request: Request) {
 }
 
 async function getUserById(id: string) {
-  return first<UserRow>('SELECT * FROM users WHERE id = ?', id);
+  return first<UserRow>('SELECT * FROM users WHERE id = ? AND permanently_deleted_at IS NULL', id);
 }
 
 async function publicUser(user: UserRow) {
@@ -279,6 +286,15 @@ function assertWorkspaceAdmin(auth: AuthContext) {
 
 function workspaceAdmin(user: UserRow) {
   return user.role === 'workspace_owner' || user.role === 'admin';
+}
+
+function defaultRoleGrant(role: Role) {
+  return {
+    canView: true,
+    canManage: role === 'client_admin' || role === 'technician',
+    canReveal: role !== 'read_only',
+    canExport: role === 'client_admin' || role === 'technician',
+  };
 }
 
 async function assignedClientIds(userId: string) {
@@ -448,7 +464,7 @@ async function beginSetup(request: Request) {
 
 async function beginLogin(request: Request) {
   const input = loginSchema.parse(await body(request));
-  const user = await first<UserRow>('SELECT * FROM users WHERE email=? COLLATE NOCASE', input.email);
+  const user = await first<UserRow>('SELECT * FROM users WHERE email=? COLLATE NOCASE AND permanently_deleted_at IS NULL', input.email);
   if (!user) {
     await derivePasswordKey(input.password, base64Url(new Uint8Array(16)));
     await audit(request, { eventType: 'auth.sign_in', targetType: 'user', outcome: 'failure', detail: { reason: 'invalid_credentials' } });
@@ -702,7 +718,7 @@ async function handleProtected(request: Request, path: string, method: string, a
 
   if (path === 'users' && method === 'GET') {
     assertUserManager(auth.user);
-    const users = await all<UserRow>('SELECT * FROM users ORDER BY name');
+    const users = await all<UserRow>('SELECT * FROM users WHERE permanently_deleted_at IS NULL ORDER BY name');
     const visibleUsers: UserRow[] = [];
     for (const user of users) {
       if (workspaceAdmin(auth.user) || await canManageTargetUser(auth.user, user)) visibleUsers.push(user);
@@ -765,10 +781,28 @@ async function handleProtected(request: Request, path: string, method: string, a
     await assertCanManageTargetUser(auth.user, target);
     const input = userProfileSchema.parse(await body(request));
     if (await first('SELECT id FROM users WHERE email=? COLLATE NOCASE AND id<>?', input.email, target.id)) throw new ApiProblem('A user with that email already exists.', 409);
-    const previousName = target.name; const previousEmail = target.email;
-    await run('UPDATE users SET name=?,email=?,updated_at=? WHERE id=?', input.name, input.email.toLowerCase(), nowIso(), target.id);
-    if (previousEmail.toLowerCase() !== input.email.toLowerCase() && target.id !== auth.user.id) await run('DELETE FROM sessions WHERE user_id=?', target.id);
-    await audit(request, { actorUserId: auth.user.id, eventType: 'user.update', targetType: 'user', targetId: target.id, detail: { fields: ['name', 'email'], previousName, name: input.name, previousEmail, email: input.email.toLowerCase() } });
+    const previousName = target.name; const previousEmail = target.email; const previousRole = target.role;
+    if (input.role) {
+      if (!workspaceAdmin(auth.user)) throw new ApiProblem('Workspace administration permission is required.', 403, 'PERMISSION_DENIED');
+      if (target.role === 'workspace_owner') throw new ApiProblem('The Workspace Owner role cannot be changed.', 403, 'PERMISSION_DENIED');
+      if (target.id === auth.user.id && input.role !== target.role) throw new ApiProblem('You cannot change your own role.');
+      if (input.role !== 'admin' && !input.clientId) throw new ApiProblem('Select a client for this role.');
+      if (input.clientId && !(await first('SELECT id FROM clients WHERE id=?', input.clientId))) throw new ApiProblem('Client not found.');
+      const grant = defaultRoleGrant(input.role);
+      const timestamp = nowIso();
+      await run('UPDATE users SET name=?,email=?,role=?,updated_at=? WHERE id=?', input.name, input.email.toLowerCase(), input.role, timestamp, target.id);
+      await run('DELETE FROM permissions WHERE user_id=?', target.id);
+      if (input.role !== 'admin') {
+        await run(`INSERT INTO permissions(id,user_id,scope_key,client_id,location_id,collection,can_view,can_manage,can_reveal,can_export,created_by,created_at,updated_at) VALUES(?,?,?,?,NULL,NULL,?,?,?,?,?,?,?)`,
+          newId(), target.id, `${input.clientId}|*|*`, input.clientId, grant.canView ? 1 : 0, grant.canManage ? 1 : 0, grant.canReveal ? 1 : 0, grant.canExport ? 1 : 0, auth.user.id, timestamp, timestamp);
+      }
+      await run('DELETE FROM sessions WHERE user_id=?', target.id);
+      await run('DELETE FROM login_challenges WHERE user_id=?', target.id);
+    } else {
+      await run('UPDATE users SET name=?,email=?,updated_at=? WHERE id=?', input.name, input.email.toLowerCase(), nowIso(), target.id);
+      if (previousEmail.toLowerCase() !== input.email.toLowerCase() && target.id !== auth.user.id) await run('DELETE FROM sessions WHERE user_id=?', target.id);
+    }
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.update', targetType: 'user', targetId: target.id, detail: { fields: input.role ? ['name', 'email', 'role', 'client'] : ['name', 'email'], previousName, name: input.name, previousEmail, email: input.email.toLowerCase(), previousRole, role: input.role ?? previousRole, clientId: input.clientId ?? null } });
     return json(await publicUser((await getUserById(target.id))!));
   }
   if (userMatch && method === 'DELETE') {
@@ -783,6 +817,29 @@ async function handleProtected(request: Request, path: string, method: string, a
     await run('UPDATE users SET disabled_at=?,updated_at=? WHERE id=?', removedAt, removedAt, target.id);
     await audit(request, { actorUserId: auth.user.id, eventType: 'user.remove', targetType: 'user', targetId: target.id, detail: { role: target.role } });
     return json({ removed: true, disabledAt: removedAt });
+  }
+  const permanentDeleteMatch = path.match(/^users\/([0-9a-f-]+)\/permanent$/u);
+  if (permanentDeleteMatch && method === 'DELETE') {
+    requireStepUp(auth);
+    if (!workspaceAdmin(auth.user)) throw new ApiProblem('Workspace administration permission is required.', 403, 'PERMISSION_DENIED');
+    const target = await getUserById(permanentDeleteMatch[1]); if (!target) throw new ApiProblem('User not found.', 404);
+    if (target.id === auth.user.id) throw new ApiProblem('You cannot permanently delete your own account.');
+    if (target.role === 'workspace_owner') throw new ApiProblem('The Workspace Owner cannot be permanently deleted.', 403, 'PERMISSION_DENIED');
+    if (!target.disabled_at) throw new ApiProblem('Remove this user before permanently deleting the account.', 409);
+    const input = permanentDeleteUserSchema.parse(await body(request));
+    if (input.confirmation.toLowerCase() !== target.email.toLowerCase()) throw new ApiProblem('Type the user email address exactly to confirm permanent deletion.');
+    const deletedAt = nowIso();
+    const erasedValue = () => `erased-${newId()}`;
+    await run('DELETE FROM sessions WHERE user_id=?', target.id);
+    await run('DELETE FROM login_challenges WHERE user_id=?', target.id);
+    await run('DELETE FROM recovery_codes WHERE user_id=?', target.id);
+    await run('DELETE FROM permissions WHERE user_id=?', target.id);
+    await run(`UPDATE users SET name='Deleted user',email=?,role='read_only',password_hash=?,kdf_salt=?,wrapped_key_nonce=?,wrapped_key_ciphertext=?,
+      mfa_secret_nonce=?,mfa_secret_ciphertext=?,mfa_enabled=0,failed_login_count=0,locked_until=NULL,disabled_at=?,permanently_deleted_at=?,
+      must_change_password=0,welcome_sent_at=NULL,welcome_send_count=0,last_login_at=NULL,updated_at=? WHERE id=?`,
+      `deleted+${target.id}@innasc.invalid`, erasedValue(), erasedValue(), erasedValue(), erasedValue(), erasedValue(), erasedValue(), deletedAt, deletedAt, deletedAt, target.id);
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.permanent_delete', targetType: 'user', targetId: target.id, detail: { role: target.role, accountDataErased: true, auditRetained: true } });
+    return json({ deleted: true });
   }
   const restoreMatch = path.match(/^users\/([0-9a-f-]+)\/restore$/u);
   if (restoreMatch && method === 'POST') {

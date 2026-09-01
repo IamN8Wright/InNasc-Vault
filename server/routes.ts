@@ -146,7 +146,10 @@ const userSchema = z.object({
 const userProfileSchema = z.object({
   name: z.string().trim().min(2).max(120),
   email: z.string().trim().email().max(254),
+  role: z.enum(roles).refine((role) => role !== 'workspace_owner').optional(),
+  clientId: z.string().uuid().nullable().optional(),
 });
+const permanentDeleteUserSchema = z.object({ confirmation: z.string().trim().max(254) });
 
 const permissionSchema = z.object({
   userId: z.string().uuid(),
@@ -165,6 +168,15 @@ function authRequest(request: Request) {
 
 function workspaceAdmin(user: UserRow) {
   return user.role === 'workspace_owner' || user.role === 'admin';
+}
+
+function defaultRoleGrant(role: UserRow['role']) {
+  return {
+    canView: true,
+    canManage: role === 'client_admin' || role === 'technician',
+    canReveal: role !== 'read_only',
+    canExport: role === 'client_admin' || role === 'technician',
+  };
 }
 
 function canManageTargetUser(actor: UserRow, target: UserRow) {
@@ -478,7 +490,7 @@ router.delete('/credentials/:id', requireCsrf, requireStepUp, (request, response
 router.get('/users', (request, response) => {
   const auth = authRequest(request);
   assertUserManager(auth.auth.user);
-  const users = db.prepare('SELECT id FROM users ORDER BY disabled_at IS NOT NULL, name').all() as Array<{ id: string }>;
+  const users = db.prepare('SELECT id FROM users WHERE permanently_deleted_at IS NULL ORDER BY disabled_at IS NOT NULL, name').all() as Array<{ id: string }>;
   const visibleUsers = users
     .map((item) => getUserById(item.id)!)
     .filter((user) => workspaceAdmin(auth.auth.user) || canManageTargetUser(auth.auth.user, user));
@@ -571,15 +583,45 @@ router.patch('/users/:id', requireCsrf, requireStepUp, (request, response) => {
   if (duplicate) return response.status(409).json({ error: 'A user with that email already exists.' });
   const previousName = target.name;
   const previousEmail = target.email;
-  db.prepare('UPDATE users SET name = ?, email = ?, updated_at = ? WHERE id = ?').run(input.name, input.email.toLowerCase(), nowIso(), target.id);
-  if (previousEmail.toLowerCase() !== input.email.toLowerCase() && target.id !== auth.auth.user.id) revokeUserSessions(target.id);
+  const previousRole = target.role;
+  if (input.role) {
+    assertWorkspaceAdmin(auth);
+    if (target.role === 'workspace_owner') return response.status(403).json({ error: 'The Workspace Owner role cannot be changed.' });
+    if (target.id === auth.auth.user.id && input.role !== target.role) return response.status(400).json({ error: 'You cannot change your own role.' });
+    if (input.role !== 'admin' && !input.clientId) return response.status(400).json({ error: 'Select a client for this role.' });
+    if (input.clientId && !db.prepare('SELECT id FROM clients WHERE id = ?').get(input.clientId)) return response.status(400).json({ error: 'Client not found.' });
+    const grant = defaultRoleGrant(input.role);
+    const timestamp = nowIso();
+    db.transaction(() => {
+      db.prepare('UPDATE users SET name = ?, email = ?, role = ?, updated_at = ? WHERE id = ?').run(input.name, input.email.toLowerCase(), input.role, timestamp, target.id);
+      db.prepare('DELETE FROM permissions WHERE user_id = ?').run(target.id);
+      if (input.role !== 'admin') {
+        db.prepare(`INSERT INTO permissions(id, user_id, scope_key, client_id, location_id, collection, can_view, can_manage, can_reveal, can_export, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`).run(
+          newId(), target.id, `${input.clientId}|*|*`, input.clientId, grant.canView ? 1 : 0, grant.canManage ? 1 : 0, grant.canReveal ? 1 : 0, grant.canExport ? 1 : 0, auth.auth.user.id, timestamp, timestamp,
+        );
+      }
+    })();
+    if (input.role !== previousRole || input.clientId) revokeUserSessions(target.id);
+  } else {
+    db.prepare('UPDATE users SET name = ?, email = ?, updated_at = ? WHERE id = ?').run(input.name, input.email.toLowerCase(), nowIso(), target.id);
+    if (previousEmail.toLowerCase() !== input.email.toLowerCase() && target.id !== auth.auth.user.id) revokeUserSessions(target.id);
+  }
   audit({
     request,
     actorUserId: auth.auth.user.id,
     eventType: 'user.update',
     targetType: 'user',
     targetId: target.id,
-    detail: { fields: ['name', 'email'], previousName, name: input.name, previousEmail, email: input.email.toLowerCase() },
+    detail: {
+      fields: input.role ? ['name', 'email', 'role', 'client'] : ['name', 'email'],
+      previousName,
+      name: input.name,
+      previousEmail,
+      email: input.email.toLowerCase(),
+      previousRole,
+      role: input.role ?? previousRole,
+      clientId: input.clientId ?? null,
+    },
   });
   return response.json(publicUser(getUserById(target.id)!));
 });
@@ -597,6 +639,35 @@ router.delete('/users/:id', requireCsrf, requireStepUp, (request, response) => {
   db.prepare('UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ?').run(removedAt, removedAt, target.id);
   audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.remove', targetType: 'user', targetId: target.id, detail: { role: target.role } });
   return response.json({ removed: true, disabledAt: removedAt });
+});
+
+router.delete('/users/:id/permanent', requireCsrf, requireStepUp, (request, response) => {
+  const auth = authRequest(request);
+  assertWorkspaceAdmin(auth);
+  const target = getUserById(String(request.params.id));
+  if (!target) return response.status(404).json({ error: 'User not found.' });
+  if (target.id === auth.auth.user.id) return response.status(400).json({ error: 'You cannot permanently delete your own account.' });
+  if (target.role === 'workspace_owner') return response.status(403).json({ error: 'The Workspace Owner cannot be permanently deleted.' });
+  if (!target.disabled_at) return response.status(409).json({ error: 'Remove this user before permanently deleting the account.' });
+  const input = permanentDeleteUserSchema.parse(request.body);
+  if (input.confirmation.toLowerCase() !== target.email.toLowerCase()) return response.status(400).json({ error: 'Type the user email address exactly to confirm permanent deletion.' });
+
+  const deletedAt = nowIso();
+  const erasedValue = () => `erased-${newId()}`;
+  revokeUserSessions(target.id);
+  db.transaction(() => {
+    db.prepare('DELETE FROM recovery_codes WHERE user_id = ?').run(target.id);
+    db.prepare('DELETE FROM passkeys WHERE user_id = ?').run(target.id);
+    db.prepare('DELETE FROM permissions WHERE user_id = ?').run(target.id);
+    db.prepare(`UPDATE users SET name = 'Deleted user', email = ?, role = 'read_only', password_hash = ?, kdf_salt = ?,
+      wrapped_key_nonce = ?, wrapped_key_ciphertext = ?, mfa_secret_nonce = ?, mfa_secret_ciphertext = ?, mfa_enabled = 0,
+      failed_login_count = 0, locked_until = NULL, disabled_at = ?, permanently_deleted_at = ?, must_change_password = 0,
+      welcome_sent_at = NULL, welcome_send_count = 0, last_login_at = NULL, updated_at = ? WHERE id = ?`).run(
+      `deleted+${target.id}@innasc.invalid`, erasedValue(), erasedValue(), erasedValue(), erasedValue(), erasedValue(), erasedValue(), deletedAt, deletedAt, deletedAt, target.id,
+    );
+  })();
+  audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.permanent_delete', targetType: 'user', targetId: target.id, detail: { role: target.role, accountDataErased: true, auditRetained: true } });
+  return response.json({ deleted: true });
 });
 
 router.post('/users/:id/restore', requireCsrf, requireStepUp, (request, response) => {

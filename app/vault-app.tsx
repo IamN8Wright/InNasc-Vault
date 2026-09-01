@@ -857,6 +857,8 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
   const [newRole, setNewRole] = useState<Role>(clientAdmin ? 'client_user' : 'technician');
   const [newClientId, setNewClientId] = useState(data.clients[0]?.id ?? '');
   const [temporaryPassword, setTemporaryPassword] = useState(() => securePassword());
+  const [editRole, setEditRole] = useState<Role>('client_user');
+  const [editClientId, setEditClientId] = useState(data.clients[0]?.id ?? '');
 
   async function createUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -909,17 +911,33 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
     event.preventDefault();
     if (!editingUser) return;
     const form = new FormData(event.currentTarget);
+    const originalClientId = editingUser.clientIds[0] ?? '';
+    const roleAssignmentChanged = workspaceAdmin
+      && editingUser.id !== session.user.id
+      && editingUser.role !== 'workspace_owner'
+      && (editRole !== editingUser.role || (editRole !== 'admin' && editClientId !== originalClientId));
     await secure(async () => {
       const updated = await api<User>(`/users/${editingUser.id}`, {
         method: 'PATCH',
         csrfToken: session.csrfToken,
-        body: JSON.stringify({ name: form.get('name'), email: form.get('email') }),
+        body: JSON.stringify({
+          name: form.get('name'),
+          email: form.get('email'),
+          role: roleAssignmentChanged ? editRole : undefined,
+          clientId: roleAssignmentChanged ? (editRole === 'admin' ? null : editClientId) : undefined,
+        }),
       });
       if (updated.id === session.user.id) setSession({ ...session, user: updated });
       setEditingUser(null);
-      showNotice('User name and email updated and audited.');
+      showNotice(roleAssignmentChanged ? 'User profile, role, and client access updated and audited.' : 'User name and email updated and audited.');
       await refresh();
     });
+  }
+
+  function beginEditUser(user: User) {
+    setEditingUser(user);
+    setEditRole(user.role);
+    setEditClientId(user.clientIds[0] ?? data.clients[0]?.id ?? '');
   }
 
   async function removeUser(user: User) {
@@ -935,6 +953,19 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
     await secure(async () => {
       await api(`/users/${user.id}/restore`, { method: 'POST', csrfToken: session.csrfToken });
       showNotice('User access restored. MFA enrollment is required at next sign-in.');
+      await refresh();
+    });
+  }
+
+  async function permanentlyDeleteUser(user: User) {
+    const confirmation = window.prompt(`Permanently delete ${user.name}?\n\nTheir login, MFA, recovery codes, and permissions will be erased. Immutable audit events will remain.\n\nType ${user.email} to confirm:`);
+    if (confirmation !== user.email) {
+      if (confirmation !== null) window.alert('The email address did not match. Nothing was deleted.');
+      return;
+    }
+    await secure(async () => {
+      await api(`/users/${user.id}/permanent`, { method: 'DELETE', csrfToken: session.csrfToken, body: JSON.stringify({ confirmation }) });
+      showNotice('User permanently deleted. Their account data was erased and audit events were retained.');
       await refresh();
     });
   }
@@ -959,17 +990,18 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
   const assignClient = clientAdmin || newRole !== 'admin';
   const grantableUsers = data.users.filter((user) => !user.disabledAt && user.role !== 'workspace_owner' && user.role !== 'admin');
   const visibleRoles = Object.entries(roleLabels).filter(([role]) => workspaceAdmin || role === 'client_admin' || role === 'client_user');
+  const canChangeEditingRole = Boolean(workspaceAdmin && editingUser && editingUser.id !== session.user.id && editingUser.role !== 'workspace_owner');
 
   return <>
     <PageHeader eyebrow="ROLE-BASED ACCESS" title={clientAdmin ? 'Client users' : 'Users & permissions'} copy={clientAdmin ? 'Add and manage Client Users only within clients where you have client-wide management access.' : 'Roles set the ceiling; client, location, and collection grants determine the records a user can access.'} action={<div className="heading-actions"><Button variant="outline" onClick={() => setPermissionOpen(true)} disabled={!data.clients.length || !grantableUsers.length}><UserCog /> Grant access</Button><Button onClick={() => { setTemporaryPassword(securePassword()); setUserOpen(true); }} disabled={!data.clients.length && clientAdmin}><Plus /> Add user</Button></div>} />
     <section className="panel table-panel">{data.users.length ? <Table><TableHeader><TableRow><TableHead>User</TableHead><TableHead>Role</TableHead><TableHead>Client access</TableHead><TableHead>Security</TableHead><TableHead>Last sign-in</TableHead><TableHead className="table-actions">Actions</TableHead></TableRow></TableHeader><TableBody>{data.users.map((user) => {
       const canEdit = user.role !== 'workspace_owner' || session.user.role === 'workspace_owner';
       const canRemove = user.id !== session.user.id && user.role !== 'workspace_owner';
-      return <TableRow key={user.id}><TableCell><div className="primary-cell"><span className="user-avatar">{initials(user.name)}</span><span><strong>{user.name}</strong><small>{user.email}</small></span></div></TableCell><TableCell><Badge variant={user.role === 'workspace_owner' || user.role === 'admin' ? 'default' : 'outline'}>{roleLabels[user.role]}</Badge></TableCell><TableCell>{clientNames(user)}</TableCell><TableCell><div className="stacked-cell">{user.disabledAt ? <Badge variant="destructive">Access removed</Badge> : <span className={user.mfaEnabled ? 'good-status' : 'warn-status'}>{user.mfaEnabled ? <Check /> : <AlertTriangle />}{user.mfaEnabled ? `${user.passkeyCount ? 'TOTP + passkey' : 'TOTP'} · ${user.recoveryCodesRemaining} recovery` : 'Enrollment required'}</span>}{!user.disabledAt && user.mustChangePassword && <small>{user.welcomeSentAt ? `Welcome sent ${dateTime(user.welcomeSentAt)}` : 'Welcome email pending'} · password change required</small>}</div></TableCell><TableCell>{dateTime(user.lastLoginAt)}</TableCell><TableCell><div className="row-actions"><Button size="sm" variant="outline" onClick={() => setEditingUser(user)} disabled={!canEdit}><Pencil /> Edit</Button>{user.disabledAt ? <Button size="sm" variant="outline" onClick={() => restoreUser(user)} disabled={!canRemove}><RefreshCw /> Restore</Button> : <>{canEdit && user.id !== session.user.id && <Button size="sm" variant="outline" onClick={() => resendWelcome(user)}><Mail /> {user.welcomeSentAt ? 'Resend welcome' : 'Send welcome'}</Button>}<Button size="sm" variant="outline" onClick={() => resetMfa(user)} disabled={user.id === session.user.id || !canEdit}><RefreshCw /> Reset MFA</Button><Button size="sm" variant="destructive" onClick={() => removeUser(user)} disabled={!canRemove}><Trash2 /> Remove</Button></>}</div></TableCell></TableRow>;
+      return <TableRow key={user.id}><TableCell><div className="primary-cell"><span className="user-avatar">{initials(user.name)}</span><span><strong>{user.name}</strong><small>{user.email}</small></span></div></TableCell><TableCell><Badge variant={user.role === 'workspace_owner' || user.role === 'admin' ? 'default' : 'outline'}>{roleLabels[user.role]}</Badge></TableCell><TableCell>{clientNames(user)}</TableCell><TableCell><div className="stacked-cell">{user.disabledAt ? <Badge variant="destructive">Access removed</Badge> : <span className={user.mfaEnabled ? 'good-status' : 'warn-status'}>{user.mfaEnabled ? <Check /> : <AlertTriangle />}{user.mfaEnabled ? `${user.passkeyCount ? 'TOTP + passkey' : 'TOTP'} · ${user.recoveryCodesRemaining} recovery` : 'Enrollment required'}</span>}{!user.disabledAt && user.mustChangePassword && <small>{user.welcomeSentAt ? `Welcome sent ${dateTime(user.welcomeSentAt)}` : 'Welcome email pending'} · password change required</small>}</div></TableCell><TableCell>{dateTime(user.lastLoginAt)}</TableCell><TableCell><div className="row-actions"><Button size="sm" variant="outline" onClick={() => beginEditUser(user)} disabled={!canEdit}><Pencil /> Edit</Button>{user.disabledAt ? <><Button size="sm" variant="outline" onClick={() => restoreUser(user)} disabled={!canRemove}><RefreshCw /> Restore</Button>{workspaceAdmin && canRemove && <Button size="sm" variant="destructive" onClick={() => permanentlyDeleteUser(user)}><Trash2 /> Delete permanently</Button>}</> : <>{canEdit && user.id !== session.user.id && <Button size="sm" variant="outline" onClick={() => resendWelcome(user)}><Mail /> {user.welcomeSentAt ? 'Resend welcome' : 'Send welcome'}</Button>}<Button size="sm" variant="outline" onClick={() => resetMfa(user)} disabled={user.id === session.user.id || !canEdit}><RefreshCw /> Reset MFA</Button><Button size="sm" variant="destructive" onClick={() => removeUser(user)} disabled={!canRemove}><Trash2 /> Remove</Button></>}</div></TableCell></TableRow>;
     })}</TableBody></Table> : <EmptyState icon={Users} title="No client users yet" copy={clientAdmin ? 'Add a Client User and assign them to one of your managed clients.' : 'Add an administrator, technician, Client Admin, or Client User.'} />}</section>
     <section className="role-grid">{visibleRoles.map(([role, label]) => <article className="role-card" key={role}><span><Users /></span><strong>{label}</strong><p>{role === 'workspace_owner' ? 'Full control and key stewardship.' : role === 'admin' ? 'Workspace administration and all client records.' : role === 'technician' ? 'Access only to explicitly assigned client scopes.' : role === 'client_admin' ? 'Add and manage Client Users within assigned client-wide scopes.' : role === 'client_user' ? 'Use only the client records and actions explicitly granted.' : 'Metadata viewing only unless reveal is explicitly granted.'}</p></article>)}</section>
     <Dialog open={userOpen} onOpenChange={setUserOpen}><DialogContent className="form-dialog form-dialog-wide"><DialogHeader><DialogTitle>{clientAdmin ? 'Add Client User' : 'Add user'}</DialogTitle><DialogDescription>A welcome email will include this temporary password. After MFA setup, the user must replace it before the vault opens.</DialogDescription></DialogHeader><form id="user-form" className="form-grid two-column" onSubmit={createUser}><Field label="Full name"><Input name="name" required /></Field><Field label="Email"><Input name="email" type="email" required /></Field><SelectField name="role" label="Role" value={newRole} onChange={(value) => setNewRole(value as Role)} required>{Object.entries(roleLabels).filter(([role]) => role !== 'workspace_owner' && (!clientAdmin || role === 'client_user')).map(([role, label]) => <option value={role} key={role}>{label}</option>)}</SelectField>{assignClient && <SelectField name="clientId" label="Client" value={newClientId} onChange={setNewClientId} required><option value="">Select client</option>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</SelectField>}<Field label="Temporary password" hint="Generated locally and sent once by the server; never stored as plaintext."><div className="input-action"><Input name="password" type="password" minLength={14} required autoComplete="new-password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} /><Button type="button" variant="outline" onClick={() => setTemporaryPassword(securePassword())}><RefreshCw /> Generate</Button></div></Field>{assignClient && <fieldset className="permission-checks"><legend>Initial client access</legend>{[['canView', 'View records', true], ['canManage', 'Create and edit', false], ['canReveal', 'Reveal and copy secrets', true], ['canExport', 'Export documentation', false]].map(([name, label, checked]) => <label key={String(name)}><input name={String(name)} type="checkbox" defaultChecked={Boolean(checked)} /><span>{String(label)}</span></label>)}</fieldset>}</form><DialogFooter><Button variant="outline" onClick={() => setUserOpen(false)}>Cancel</Button><Button type="submit" form="user-form"><Mail /> Verify, create & email</Button></DialogFooter></DialogContent></Dialog>
-    <Dialog open={Boolean(editingUser)} onOpenChange={(open) => { if (!open) setEditingUser(null); }}><DialogContent className="form-dialog"><DialogHeader><DialogTitle>Edit user</DialogTitle><DialogDescription>Changing an email address changes the address used to sign in. Existing authenticator codes continue to work.</DialogDescription></DialogHeader><form id="edit-user-form" className="form-grid" onSubmit={updateUserProfile}><Field label="Full name"><Input name="name" required minLength={2} maxLength={120} defaultValue={editingUser?.name} autoFocus /></Field><Field label="Email"><Input name="email" type="email" required maxLength={254} defaultValue={editingUser?.email} /></Field></form><DialogFooter><Button variant="outline" onClick={() => setEditingUser(null)}>Cancel</Button><Button type="submit" form="edit-user-form"><Pencil /> Verify & save user</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(editingUser)} onOpenChange={(open) => { if (!open) setEditingUser(null); }}><DialogContent className="form-dialog form-dialog-wide"><DialogHeader><DialogTitle>Edit user</DialogTitle><DialogDescription>Update the sign-in identity or reassign a non-owner role. Role changes sign the user out and replace their existing client grants.</DialogDescription></DialogHeader><form id="edit-user-form" className="form-grid two-column" onSubmit={updateUserProfile}><Field label="Full name"><Input name="name" required minLength={2} maxLength={120} defaultValue={editingUser?.name} autoFocus /></Field><Field label="Email"><Input name="email" type="email" required maxLength={254} defaultValue={editingUser?.email} /></Field>{canChangeEditingRole && <SelectField name="role" label="Role" value={editRole} onChange={(value) => setEditRole(value as Role)} required>{Object.entries(roleLabels).filter(([role]) => role !== 'workspace_owner').map(([role, label]) => <option value={role} key={role}>{label}</option>)}</SelectField>}{canChangeEditingRole && editRole !== 'admin' && <SelectField name="clientId" label="Client assignment" value={editClientId} onChange={setEditClientId} required><option value="">Select client</option>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</SelectField>}</form><DialogFooter><Button variant="outline" onClick={() => setEditingUser(null)}>Cancel</Button><Button type="submit" form="edit-user-form"><Pencil /> Verify & save user</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={permissionOpen} onOpenChange={setPermissionOpen}><DialogContent className="form-dialog form-dialog-wide"><DialogHeader><DialogTitle>Grant scoped access</DialogTitle><DialogDescription>More specific location or collection grants override broader client grants. Client Admins cannot grant an action they do not have themselves.</DialogDescription></DialogHeader><form id="permission-form" className="form-grid two-column" onSubmit={savePermission}><SelectField name="userId" label="User" value={targetUserId} onChange={setTargetUserId} required><option value="">Select user</option>{grantableUsers.map((user) => <option key={user.id} value={user.id}>{user.name} — {roleLabels[user.role]}</option>)}</SelectField><SelectField name="clientId" label="Client" value={clientId} onChange={(value) => { setClientId(value); setLocationId(''); }} required><option value="">Select client</option>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</SelectField><SelectField name="locationId" label="Location (optional)" value={locationId} onChange={setLocationId}><option value="">All client locations</option>{data.locations.filter((location) => location.client_id === clientId).map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</SelectField><SelectField name="collection" label="Collection (optional)"><option value="">All collections</option>{Object.entries(collectionLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectField><fieldset className="permission-checks"><legend>Allowed actions</legend>{[['canView', 'View records'], ['canManage', 'Create and edit'], ['canReveal', 'Reveal and copy secrets'], ['canExport', 'Export documentation']].map(([name, label]) => <label key={name}><input name={name} type="checkbox" defaultChecked={name === 'canView'} /><span>{label}</span></label>)}</fieldset></form><DialogFooter><Button variant="outline" onClick={() => setPermissionOpen(false)}>Cancel</Button><Button type="submit" form="permission-form"><ShieldCheck /> Verify & save grant</Button></DialogFooter></DialogContent></Dialog>
   </>;
 }
