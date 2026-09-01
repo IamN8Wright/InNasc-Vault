@@ -229,6 +229,10 @@ try {
   const stepUp = await request('/auth/step-up', secured({ code: stepUpToken }));
   assert.equal(stepUp.response.status, 200);
 
+  const existingUserWelcome = await request(`/users/${clientAdmin.body.id}/resend-welcome`, secured({}));
+  assert.equal(existingUserWelcome.response.status, 503);
+  assert.equal(existingUserWelcome.body.code, 'EMAIL_NOT_CONFIGURED');
+
   const renamedOwner = await request(`/users/${verified.body.user.id}`, {
     ...secured({ name: 'Renamed Automated Owner', email: 'renamed-owner@example.invalid' }),
     method: 'PATCH',

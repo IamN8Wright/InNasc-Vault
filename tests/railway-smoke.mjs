@@ -175,6 +175,10 @@ try {
   cookie = ownerCookie;
   csrfToken = ownerCsrfToken;
 
+  const existingHostedUserWelcome = await request(`/users/${hostedClientUser.body.id}/resend-welcome`, { method: 'POST', body: {}, csrf: true });
+  assert.equal(existingHostedUserWelcome.response.status, 503);
+  assert.equal(existingHostedUserWelcome.body.code, 'EMAIL_NOT_CONFIGURED');
+
   const updatedHostedClientUser = await request(`/users/${hostedClientUser.body.id}`, {
     method: 'PATCH',
     body: { name: 'Updated Hosted Client User', email: 'updated-hosted-client-user@example.invalid' },

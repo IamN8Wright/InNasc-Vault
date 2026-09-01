@@ -31,7 +31,16 @@ try {
   assert.equal(message.from, process.env.INNASC_EMAIL_FROM);
   assert.deepEqual(message.to, ['recipient@example.invalid']);
   assert.ok(message.text.includes(temporaryPassword));
+  assert.ok(message.text.includes('This email address is not monitored. Please do not reply.'));
   assert.ok(message.html.includes('https://vault.innasc.com'));
+  assert.ok(message.html.includes('src="cid:innasc-vault-logo"'));
+  assert.deepEqual(message.attachments, [
+    {
+      path: 'https://vault.innasc.com/innasc-vault-mark.png',
+      filename: 'innasc-vault-mark.png',
+      contentId: 'innasc-vault-logo',
+    },
+  ]);
   console.log('PASS: Resend HTTPS welcome-email provider and secure configuration smoke test');
 } finally {
   globalThis.fetch = originalFetch;

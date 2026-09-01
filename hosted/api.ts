@@ -742,7 +742,6 @@ async function handleProtected(request: Request, path: string, method: string, a
     const target = await getUserById(resendWelcomeMatch[1]); if (!target) throw new ApiProblem('User not found.', 404);
     await assertCanManageTargetUser(auth.user, target);
     if (target.disabled_at) throw new ApiProblem('Restore this user before resending the welcome email.', 409);
-    if (!target.must_change_password) throw new ApiProblem('This user has completed onboarding. Use a password-reset workflow instead.', 409, 'ONBOARDING_COMPLETE');
     if (!welcomeEmailConfigured()) {
       await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'email_provider_not_configured', resend: true } });
       throw new ApiProblem('Welcome email is not configured. Add the Resend API settings, then try again.', 503, 'EMAIL_NOT_CONFIGURED');

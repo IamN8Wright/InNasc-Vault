@@ -55,6 +55,8 @@ export async function sendWelcomeEmail(message: WelcomeMessage): Promise<Welcome
   const smtp = smtpSettings();
   if (!resend && !smtp) return { configured: false, sent: false };
   const appUrl = resend?.appUrl ?? smtp!.appUrl;
+  const logoContentId = 'innasc-vault-logo';
+  const logoUrl = new URL('/innasc-vault-mark.png', appUrl).toString();
   const mfaStep = message.mfaAlreadyEnrolled
     ? 'Confirm sign-in with your existing authenticator code.'
     : 'Enroll an authenticator app when prompted and save the recovery codes.';
@@ -71,8 +73,11 @@ export async function sendWelcomeEmail(message: WelcomeMessage): Promise<Welcome
     '3. Create a new private password before the vault opens.',
     '',
     'This temporary password stops working when an administrator resends this welcome email. Do not forward this message.',
+    '',
+    'This is an automated message from InNasc Vault. This email address is not monitored. Please do not reply.',
   ].join('\n');
-  const html = `<div style="font-family:Arial,sans-serif;line-height:1.55;color:#102033;max-width:620px"><h1 style="color:#1557d6">Welcome to InNasc Vault</h1><p>Hello ${escapeHtml(message.name)},</p><p>Your secure workspace account is ready.</p><div style="background:#f3f7ff;border:1px solid #c8d8f4;border-radius:10px;padding:18px"><p><strong>Sign in:</strong> <a href="${escapeHtml(appUrl)}">${escapeHtml(appUrl)}</a><br><strong>Email:</strong> ${escapeHtml(message.email)}<br><strong>Temporary password:</strong> <code style="font-size:15px">${escapeHtml(message.temporaryPassword)}</code></p></div><h2 style="font-size:18px">Complete your secure setup</h2><ol><li>Sign in with the email and temporary password above.</li><li>${escapeHtml(mfaStep)}</li><li>Create a new private password before the vault opens.</li></ol><p style="color:#5d6673;font-size:13px">This temporary password stops working when an administrator resends this welcome email. Do not forward this message.</p></div>`;
+  const html = `<div style="font-family:Arial,sans-serif;line-height:1.55;color:#102033;max-width:620px"><div style="text-align:center;margin:0 0 20px"><img src="cid:${logoContentId}" alt="InNasc Vault" width="96" height="96" style="display:inline-block;width:96px;height:96px;border:0"></div><h1 style="color:#1557d6;text-align:center">Welcome to InNasc Vault</h1><p>Hello ${escapeHtml(message.name)},</p><p>Your secure workspace account is ready.</p><div style="background:#f3f7ff;border:1px solid #c8d8f4;border-radius:10px;padding:18px"><p><strong>Sign in:</strong> <a href="${escapeHtml(appUrl)}">${escapeHtml(appUrl)}</a><br><strong>Email:</strong> ${escapeHtml(message.email)}<br><strong>Temporary password:</strong> <code style="font-size:15px">${escapeHtml(message.temporaryPassword)}</code></p></div><h2 style="font-size:18px">Complete your secure setup</h2><ol><li>Sign in with the email and temporary password above.</li><li>${escapeHtml(mfaStep)}</li><li>Create a new private password before the vault opens.</li></ol><p style="color:#5d6673;font-size:13px">This temporary password stops working when an administrator resends this welcome email. Do not forward this message.</p><hr style="border:0;border-top:1px solid #d8e0eb;margin:24px 0 14px"><p style="color:#6b7280;font-size:12px;text-align:center">This is an automated message from InNasc Vault. This email address is not monitored. Please do not reply.</p></div>`;
+  const logoAttachment = { path: logoUrl, filename: 'innasc-vault-mark.png', contentId: logoContentId };
 
   try {
     if (resend) {
@@ -83,7 +88,14 @@ export async function sendWelcomeEmail(message: WelcomeMessage): Promise<Welcome
           'Content-Type': 'application/json',
           'Idempotency-Key': `innasc-welcome-${crypto.randomUUID()}`,
         },
-        body: JSON.stringify({ from: resend.from, to: [message.email], subject: 'Welcome to InNasc Vault', text, html }),
+        body: JSON.stringify({
+          from: resend.from,
+          to: [message.email],
+          subject: 'Welcome to InNasc Vault',
+          text,
+          html,
+          attachments: [logoAttachment],
+        }),
         signal: AbortSignal.timeout(20_000),
       });
       return { configured: true, sent: response.ok };
@@ -99,7 +111,14 @@ export async function sendWelcomeEmail(message: WelcomeMessage): Promise<Welcome
       greetingTimeout: 10_000,
       socketTimeout: 20_000,
     });
-    await transporter.sendMail({ from: smtp!.from, to: message.email, subject: 'Welcome to InNasc Vault', text, html });
+    await transporter.sendMail({
+      from: smtp!.from,
+      to: message.email,
+      subject: 'Welcome to InNasc Vault',
+      text,
+      html,
+      attachments: [{ filename: logoAttachment.filename, path: logoAttachment.path, cid: logoContentId }],
+    });
     return { configured: true, sent: true };
   } catch {
     return { configured: true, sent: false };

@@ -543,7 +543,6 @@ router.post('/users/:id/resend-welcome', requireCsrf, requireStepUp, asyncRoute(
   if (!target) return response.status(404).json({ error: 'User not found.' });
   assertCanManageTargetUser(auth.auth.user, target);
   if (target.disabled_at) return response.status(409).json({ error: 'Restore this user before resending the welcome email.' });
-  if (!target.must_change_password) return response.status(409).json({ error: 'This user has completed onboarding. Use a password-reset workflow instead.', code: 'ONBOARDING_COMPLETE' });
   if (!welcomeEmailConfigured()) {
     audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'email_provider_not_configured', resend: true } });
     return response.status(503).json({ error: 'Welcome email is not configured. Add the Resend API settings, then try again.', code: 'EMAIL_NOT_CONFIGURED' });
