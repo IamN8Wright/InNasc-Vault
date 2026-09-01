@@ -22,6 +22,7 @@ import {
   verifyTotp,
 } from '@/hosted/crypto';
 import { all, ApiProblem, ensureHostedSchema, first, hostedEnv, newId, nowIso, run, serverKey } from '@/hosted/db';
+import { sendWelcomeEmail, welcomeEmailConfigured } from '@/hosted/email';
 
 const roles = ['workspace_owner', 'admin', 'technician', 'client_admin', 'client_user', 'read_only'] as const;
 const collections = ['network', 'av_systems', 'voip', 'access_control', 'remote_access', 'software', 'websites_accounts', 'general'] as const;
@@ -44,6 +45,9 @@ type UserRow = {
   failed_login_count: number;
   locked_until: string | null;
   disabled_at: string | null;
+  must_change_password: number;
+  welcome_sent_at: string | null;
+  welcome_send_count: number;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
@@ -207,6 +211,9 @@ async function publicUser(user: UserRow) {
     passkeyCount: 0,
     clientIds,
     disabledAt: user.disabled_at,
+    mustChangePassword: Boolean(user.must_change_password),
+    welcomeSentAt: user.welcome_sent_at,
+    welcomeSendCount: user.welcome_send_count,
     lastLoginAt: user.last_login_at,
   };
 }
@@ -500,6 +507,27 @@ async function currentSession(auth: AuthContext) {
   return { user: await publicUser(auth.user), csrfToken: auth.csrfToken, expiresAt: auth.expiresAt, stepUpUntil: auth.stepUpUntil, capabilities: { passkeys: false, sqliteBackup: false } };
 }
 
+async function changeHostedTemporaryPassword(request: Request, auth: AuthContext, password: string) {
+  if (!auth.user.must_change_password) throw new ApiProblem('This temporary password has already been replaced.', 409, 'PASSWORD_ALREADY_CHANGED');
+  const salt = base64Url(randomBytes(16));
+  const wrapped = await encryptBytes(auth.vaultKey, await derivePasswordKey(password, salt), `user:${auth.user.id}:vault-key:v1`);
+  const timestamp = nowIso();
+  await run(`UPDATE users SET password_hash=?,kdf_salt=?,wrapped_key_nonce=?,wrapped_key_ciphertext=?,must_change_password=0,
+    failed_login_count=0,locked_until=NULL,updated_at=? WHERE id=?`, await hashPassword(password), salt, wrapped.nonce, wrapped.ciphertext, timestamp, auth.user.id);
+  auth.user = (await getUserById(auth.user.id))!;
+  await audit(request, { actorUserId: auth.user.id, eventType: 'auth.temporary_password_changed', targetType: 'user', targetId: auth.user.id });
+  return currentSession(auth);
+}
+
+async function rotateHostedTemporaryPassword(target: UserRow, vaultKey: Uint8Array, password: string) {
+  const salt = base64Url(randomBytes(16));
+  const wrapped = await encryptBytes(vaultKey, await derivePasswordKey(password, salt), `user:${target.id}:vault-key:v1`);
+  await run(`UPDATE users SET password_hash=?,kdf_salt=?,wrapped_key_nonce=?,wrapped_key_ciphertext=?,must_change_password=1,
+    failed_login_count=0,locked_until=NULL,updated_at=? WHERE id=?`, await hashPassword(password), salt, wrapped.nonce, wrapped.ciphertext, nowIso(), target.id);
+  await run('DELETE FROM sessions WHERE user_id=?', target.id);
+  await run('DELETE FROM login_challenges WHERE user_id=?', target.id);
+}
+
 async function handleProtected(request: Request, path: string, method: string, auth: AuthContext) {
   if (method !== 'GET') await requireCsrf(request, auth);
 
@@ -509,6 +537,11 @@ async function handleProtected(request: Request, path: string, method: string, a
     await audit(request, { actorUserId: auth.user.id, eventType: 'auth.sign_out', targetType: 'user', targetId: auth.user.id });
     return noContent({ 'Set-Cookie': clearSessionCookie() });
   }
+  if (path === 'auth/change-temporary-password' && method === 'POST') {
+    const input = z.object({ password: strongPassword }).parse(await body(request));
+    return json(await changeHostedTemporaryPassword(request, auth, input.password));
+  }
+  if (auth.user.must_change_password) throw new ApiProblem('Create a new password before opening the vault.', 428, 'PASSWORD_CHANGE_REQUIRED');
   if (path === 'auth/step-up' && method === 'POST') {
     const input = z.object({ code: z.string().trim().min(6).max(32) }).parse(await body(request));
     const secret = await decryptText(auth.user.mfa_secret_nonce, auth.user.mfa_secret_ciphertext, auth.vaultKey, `user:${auth.user.id}:totp:v1`);
@@ -695,10 +728,36 @@ async function handleProtected(request: Request, path: string, method: string, a
     const userId = newId(); const timestamp = nowIso(); const salt = base64Url(randomBytes(16));
     const wrapped = await encryptBytes(auth.vaultKey, await derivePasswordKey(input.password, salt), `user:${userId}:vault-key:v1`);
     const encryptedTotp = await encryptText(makeTotpSecret(), auth.vaultKey, `user:${userId}:totp:v1`);
-    await run('INSERT INTO users(id,name,email,role,password_hash,kdf_salt,wrapped_key_nonce,wrapped_key_ciphertext,mfa_secret_nonce,mfa_secret_ciphertext,mfa_enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)', userId, input.name, input.email.toLowerCase(), input.role, await hashPassword(input.password), salt, wrapped.nonce, wrapped.ciphertext, encryptedTotp.nonce, encryptedTotp.ciphertext, timestamp, timestamp);
+    await run('INSERT INTO users(id,name,email,role,password_hash,kdf_salt,wrapped_key_nonce,wrapped_key_ciphertext,mfa_secret_nonce,mfa_secret_ciphertext,mfa_enabled,must_change_password,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,1,?,?)', userId, input.name, input.email.toLowerCase(), input.role, await hashPassword(input.password), salt, wrapped.nonce, wrapped.ciphertext, encryptedTotp.nonce, encryptedTotp.ciphertext, timestamp, timestamp);
     await audit(request, { actorUserId: auth.user.id, eventType: 'user.create', targetType: 'user', targetId: userId, detail: { role: input.role } });
     if (input.clientId) await savePermissionGrant(request, auth, { userId, clientId: input.clientId, locationId: null, collection: null, canView: input.canView, canManage: input.canManage, canReveal: input.canReveal, canExport: input.canExport });
-    return json(await publicUser((await getUserById(userId))!), 201);
+    const welcomeEmail = await sendWelcomeEmail({ name: input.name, email: input.email.toLowerCase(), temporaryPassword: input.password, mfaAlreadyEnrolled: false });
+    if (welcomeEmail.sent) await run('UPDATE users SET welcome_sent_at=?,welcome_send_count=welcome_send_count+1,updated_at=? WHERE id=?', nowIso(), nowIso(), userId);
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: userId, outcome: welcomeEmail.sent ? 'success' : welcomeEmail.configured ? 'failure' : 'blocked', detail: { reason: welcomeEmail.sent ? 'sent' : welcomeEmail.configured ? 'delivery_failed' : 'smtp_not_configured' } });
+    return json({ ...(await publicUser((await getUserById(userId))!)), welcomeEmail }, 201);
+  }
+  const resendWelcomeMatch = path.match(/^users\/([0-9a-f-]+)\/resend-welcome$/u);
+  if (resendWelcomeMatch && method === 'POST') {
+    requireStepUp(auth);
+    const target = await getUserById(resendWelcomeMatch[1]); if (!target) throw new ApiProblem('User not found.', 404);
+    await assertCanManageTargetUser(auth.user, target);
+    if (target.disabled_at) throw new ApiProblem('Restore this user before resending the welcome email.', 409);
+    if (!target.must_change_password) throw new ApiProblem('This user has completed onboarding. Use a password-reset workflow instead.', 409, 'ONBOARDING_COMPLETE');
+    if (!welcomeEmailConfigured()) {
+      await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'smtp_not_configured', resend: true } });
+      throw new ApiProblem('Welcome email is not configured. Add the SMTP settings, then try again.', 503, 'EMAIL_NOT_CONFIGURED');
+    }
+    const temporaryPassword = `Nv!9${randomToken(24)}`;
+    await rotateHostedTemporaryPassword(target, auth.vaultKey, temporaryPassword);
+    const welcomeEmail = await sendWelcomeEmail({ name: target.name, email: target.email, temporaryPassword, mfaAlreadyEnrolled: Boolean(target.mfa_enabled) });
+    if (!welcomeEmail.sent) {
+      await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'failure', detail: { reason: 'delivery_failed', resend: true, passwordRotated: true } });
+      throw new ApiProblem('The temporary password was rotated, but email delivery failed. Check SMTP and resend again.', 502, 'EMAIL_DELIVERY_FAILED');
+    }
+    const sentAt = nowIso();
+    await run('UPDATE users SET welcome_sent_at=?,welcome_send_count=welcome_send_count+1,updated_at=? WHERE id=?', sentAt, sentAt, target.id);
+    await audit(request, { actorUserId: auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, detail: { resend: true, passwordRotated: true } });
+    return json({ ...(await publicUser((await getUserById(target.id))!)), welcomeEmail });
   }
   const userMatch = path.match(/^users\/([0-9a-f-]+)$/u);
   if (userMatch && method === 'PATCH') {

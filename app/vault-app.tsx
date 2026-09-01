@@ -19,6 +19,7 @@ import {
   LayoutDashboard,
   LockKeyhole,
   LogOut,
+  Mail,
   MapPin,
   MonitorCog,
   Network,
@@ -76,6 +77,9 @@ type User = {
   passkeyCount: number;
   clientIds: string[];
   disabledAt: string | null;
+  mustChangePassword: boolean;
+  welcomeSentAt: string | null;
+  welcomeSendCount: number;
   lastLoginAt: string | null;
 };
 
@@ -214,6 +218,9 @@ export default function VaultApp() {
       />
     );
   }
+  if (session.user.mustChangePassword) {
+    return <PasswordChangeScreen session={session} onChanged={setSession} />;
+  }
   return <Workspace session={session} setSession={setSession} />;
 }
 
@@ -240,6 +247,57 @@ function OfflineScreen({ onRetry }: { onRetry: () => void }) {
         <h1>InNasc Vault is not running</h1>
         <p className="auth-copy">Double-click <strong>Start-InNasc-Vault.cmd</strong>, leave the black window open, then retry.</p>
         <Button size="lg" onClick={onRetry}><RefreshCw /> Retry connection</Button>
+      </section>
+    </main>
+  );
+}
+
+function PasswordChangeScreen({ session, onChanged }: { session: Session; onChanged: (session: Session) => void }) {
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function replacePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError('');
+    const form = new FormData(event.currentTarget);
+    const passwordValue = form.get('password');
+    const confirmationValue = form.get('confirmation');
+    const password = typeof passwordValue === 'string' ? passwordValue : '';
+    const confirmation = typeof confirmationValue === 'string' ? confirmationValue : '';
+    if (password !== confirmation) {
+      setError('The new passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await api<Session>('/auth/change-temporary-password', {
+        method: 'POST',
+        csrfToken: session.csrfToken,
+        body: JSON.stringify({ password }),
+      });
+      onChanged({ ...session, ...updated });
+    } catch (nextError) {
+      setError(messageFrom(nextError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card">
+        <Brand />
+        <span className="auth-icon"><KeyRound /></span>
+        <p className="eyebrow">FINAL ONBOARDING STEP</p>
+        <h1>Create your private password</h1>
+        <p className="auth-copy">MFA is confirmed. Replace the emailed temporary password before the vault opens. Your new password is never emailed or stored as plaintext.</p>
+        <form className="auth-form" onSubmit={replacePassword}>
+          <label>New password<Input name="password" type="password" autoComplete="new-password" required minLength={14} /></label>
+          <label>Confirm new password<Input name="confirmation" type="password" autoComplete="new-password" required minLength={14} /></label>
+          <p className="field-hint">At least 14 characters with uppercase, lowercase, number, and symbol.</p>
+          {error && <Alert variant="destructive"><AlertTriangle /><AlertTitle>Couldn’t change password</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+          <Button size="lg" type="submit" disabled={busy}>{busy ? <RefreshCw className="spin" /> : <ShieldCheck />} Save password and open vault</Button>
+        </form>
       </section>
     </main>
   );
@@ -798,18 +856,19 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
   const [locationId, setLocationId] = useState('');
   const [newRole, setNewRole] = useState<Role>(clientAdmin ? 'client_user' : 'technician');
   const [newClientId, setNewClientId] = useState(data.clients[0]?.id ?? '');
+  const [temporaryPassword, setTemporaryPassword] = useState(() => securePassword());
 
   async function createUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     await secure(async () => {
-      await api('/users', {
+      const created = await api<User & { welcomeEmail: { configured: boolean; sent: boolean } }>('/users', {
         method: 'POST',
         csrfToken: session.csrfToken,
         body: JSON.stringify({
           name: form.get('name'),
           email: form.get('email'),
-          password: form.get('password'),
+          password: temporaryPassword,
           role: clientAdmin ? 'client_user' : form.get('role'),
           clientId: form.get('clientId') || null,
           canView: form.get('canView') === 'on',
@@ -818,7 +877,14 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
           canExport: form.get('canExport') === 'on',
         }),
       });
-      setUserOpen(false); showNotice('User created. MFA enrollment is forced at first sign-in.'); await refresh();
+      setUserOpen(false);
+      setTemporaryPassword(securePassword());
+      showNotice(created.welcomeEmail.sent
+        ? `Welcome email sent to ${created.email}. MFA enrollment and a new password are required.`
+        : created.welcomeEmail.configured
+          ? 'User created, but email delivery failed. Check SMTP and use Resend welcome.'
+          : 'User created. Configure SMTP, then use Resend welcome to deliver a new temporary password.');
+      await refresh();
     });
   }
 
@@ -873,6 +939,15 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
     });
   }
 
+  async function resendWelcome(user: User) {
+    if (!window.confirm(`Resend the welcome email to ${user.email}? This replaces their current temporary password immediately.`)) return;
+    await secure(async () => {
+      await api(`/users/${user.id}/resend-welcome`, { method: 'POST', csrfToken: session.csrfToken });
+      showNotice(`A new temporary password was emailed to ${user.email}. The previous one no longer works.`);
+      await refresh();
+    });
+  }
+
   function clientNames(user: User) {
     const names = user.clientIds.map((id) => data.clients.find((client) => client.id === id)?.name).filter(Boolean);
     return names.length ? names.join(', ') : user.role === 'workspace_owner' || user.role === 'admin' ? 'All clients' : 'No client assigned';
@@ -883,14 +958,14 @@ function UsersPage({ data, session, refresh, secure, showNotice, setSession }: P
   const visibleRoles = Object.entries(roleLabels).filter(([role]) => workspaceAdmin || role === 'client_admin' || role === 'client_user');
 
   return <>
-    <PageHeader eyebrow="ROLE-BASED ACCESS" title={clientAdmin ? 'Client users' : 'Users & permissions'} copy={clientAdmin ? 'Add and manage Client Users only within clients where you have client-wide management access.' : 'Roles set the ceiling; client, location, and collection grants determine the records a user can access.'} action={<div className="heading-actions"><Button variant="outline" onClick={() => setPermissionOpen(true)} disabled={!data.clients.length || !grantableUsers.length}><UserCog /> Grant access</Button><Button onClick={() => setUserOpen(true)} disabled={!data.clients.length && clientAdmin}><Plus /> Add user</Button></div>} />
+    <PageHeader eyebrow="ROLE-BASED ACCESS" title={clientAdmin ? 'Client users' : 'Users & permissions'} copy={clientAdmin ? 'Add and manage Client Users only within clients where you have client-wide management access.' : 'Roles set the ceiling; client, location, and collection grants determine the records a user can access.'} action={<div className="heading-actions"><Button variant="outline" onClick={() => setPermissionOpen(true)} disabled={!data.clients.length || !grantableUsers.length}><UserCog /> Grant access</Button><Button onClick={() => { setTemporaryPassword(securePassword()); setUserOpen(true); }} disabled={!data.clients.length && clientAdmin}><Plus /> Add user</Button></div>} />
     <section className="panel table-panel">{data.users.length ? <Table><TableHeader><TableRow><TableHead>User</TableHead><TableHead>Role</TableHead><TableHead>Client access</TableHead><TableHead>Security</TableHead><TableHead>Last sign-in</TableHead><TableHead className="table-actions">Actions</TableHead></TableRow></TableHeader><TableBody>{data.users.map((user) => {
       const canEdit = user.role !== 'workspace_owner' || session.user.role === 'workspace_owner';
       const canRemove = user.id !== session.user.id && user.role !== 'workspace_owner';
-      return <TableRow key={user.id}><TableCell><div className="primary-cell"><span className="user-avatar">{initials(user.name)}</span><span><strong>{user.name}</strong><small>{user.email}</small></span></div></TableCell><TableCell><Badge variant={user.role === 'workspace_owner' || user.role === 'admin' ? 'default' : 'outline'}>{roleLabels[user.role]}</Badge></TableCell><TableCell>{clientNames(user)}</TableCell><TableCell>{user.disabledAt ? <Badge variant="destructive">Access removed</Badge> : <span className={user.mfaEnabled ? 'good-status' : 'warn-status'}>{user.mfaEnabled ? <Check /> : <AlertTriangle />}{user.mfaEnabled ? `${user.passkeyCount ? 'TOTP + passkey' : 'TOTP'} · ${user.recoveryCodesRemaining} recovery` : 'Enrollment required'}</span>}</TableCell><TableCell>{dateTime(user.lastLoginAt)}</TableCell><TableCell><div className="row-actions"><Button size="sm" variant="outline" onClick={() => setEditingUser(user)} disabled={!canEdit}><Pencil /> Edit</Button>{user.disabledAt ? <Button size="sm" variant="outline" onClick={() => restoreUser(user)} disabled={!canRemove}><RefreshCw /> Restore</Button> : <><Button size="sm" variant="outline" onClick={() => resetMfa(user)} disabled={user.id === session.user.id || !canEdit}><RefreshCw /> Reset MFA</Button><Button size="sm" variant="destructive" onClick={() => removeUser(user)} disabled={!canRemove}><Trash2 /> Remove</Button></>}</div></TableCell></TableRow>;
+      return <TableRow key={user.id}><TableCell><div className="primary-cell"><span className="user-avatar">{initials(user.name)}</span><span><strong>{user.name}</strong><small>{user.email}</small></span></div></TableCell><TableCell><Badge variant={user.role === 'workspace_owner' || user.role === 'admin' ? 'default' : 'outline'}>{roleLabels[user.role]}</Badge></TableCell><TableCell>{clientNames(user)}</TableCell><TableCell><div className="stacked-cell">{user.disabledAt ? <Badge variant="destructive">Access removed</Badge> : <span className={user.mfaEnabled ? 'good-status' : 'warn-status'}>{user.mfaEnabled ? <Check /> : <AlertTriangle />}{user.mfaEnabled ? `${user.passkeyCount ? 'TOTP + passkey' : 'TOTP'} · ${user.recoveryCodesRemaining} recovery` : 'Enrollment required'}</span>}{!user.disabledAt && user.mustChangePassword && <small>{user.welcomeSentAt ? `Welcome sent ${dateTime(user.welcomeSentAt)}` : 'Welcome email pending'} · password change required</small>}</div></TableCell><TableCell>{dateTime(user.lastLoginAt)}</TableCell><TableCell><div className="row-actions"><Button size="sm" variant="outline" onClick={() => setEditingUser(user)} disabled={!canEdit}><Pencil /> Edit</Button>{user.disabledAt ? <Button size="sm" variant="outline" onClick={() => restoreUser(user)} disabled={!canRemove}><RefreshCw /> Restore</Button> : <>{user.mustChangePassword && <Button size="sm" variant="outline" onClick={() => resendWelcome(user)} disabled={!canEdit}><Mail /> Resend welcome</Button>}<Button size="sm" variant="outline" onClick={() => resetMfa(user)} disabled={user.id === session.user.id || !canEdit}><RefreshCw /> Reset MFA</Button><Button size="sm" variant="destructive" onClick={() => removeUser(user)} disabled={!canRemove}><Trash2 /> Remove</Button></>}</div></TableCell></TableRow>;
     })}</TableBody></Table> : <EmptyState icon={Users} title="No client users yet" copy={clientAdmin ? 'Add a Client User and assign them to one of your managed clients.' : 'Add an administrator, technician, Client Admin, or Client User.'} />}</section>
     <section className="role-grid">{visibleRoles.map(([role, label]) => <article className="role-card" key={role}><span><Users /></span><strong>{label}</strong><p>{role === 'workspace_owner' ? 'Full control and key stewardship.' : role === 'admin' ? 'Workspace administration and all client records.' : role === 'technician' ? 'Access only to explicitly assigned client scopes.' : role === 'client_admin' ? 'Add and manage Client Users within assigned client-wide scopes.' : role === 'client_user' ? 'Use only the client records and actions explicitly granted.' : 'Metadata viewing only unless reveal is explicitly granted.'}</p></article>)}</section>
-    <Dialog open={userOpen} onOpenChange={setUserOpen}><DialogContent className="form-dialog form-dialog-wide"><DialogHeader><DialogTitle>{clientAdmin ? 'Add Client User' : 'Add user'}</DialogTitle><DialogDescription>Give the initial password through a separate secure channel. The user must enroll an authenticator on first sign-in.</DialogDescription></DialogHeader><form id="user-form" className="form-grid two-column" onSubmit={createUser}><Field label="Full name"><Input name="name" required /></Field><Field label="Email"><Input name="email" type="email" required /></Field><SelectField name="role" label="Role" value={newRole} onChange={(value) => setNewRole(value as Role)} required>{Object.entries(roleLabels).filter(([role]) => role !== 'workspace_owner' && (!clientAdmin || role === 'client_user')).map(([role, label]) => <option value={role} key={role}>{label}</option>)}</SelectField>{assignClient && <SelectField name="clientId" label="Client" value={newClientId} onChange={setNewClientId} required><option value="">Select client</option>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</SelectField>}<Field label="Initial password" hint="At least 14 characters with uppercase, lowercase, number, and symbol."><Input name="password" type="password" minLength={14} required autoComplete="new-password" /></Field>{assignClient && <fieldset className="permission-checks"><legend>Initial client access</legend>{[['canView', 'View records', true], ['canManage', 'Create and edit', false], ['canReveal', 'Reveal and copy secrets', true], ['canExport', 'Export documentation', false]].map(([name, label, checked]) => <label key={String(name)}><input name={String(name)} type="checkbox" defaultChecked={Boolean(checked)} /><span>{String(label)}</span></label>)}</fieldset>}</form><DialogFooter><Button variant="outline" onClick={() => setUserOpen(false)}>Cancel</Button><Button type="submit" form="user-form">Verify & create user</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={userOpen} onOpenChange={setUserOpen}><DialogContent className="form-dialog form-dialog-wide"><DialogHeader><DialogTitle>{clientAdmin ? 'Add Client User' : 'Add user'}</DialogTitle><DialogDescription>A welcome email will include this temporary password. After MFA setup, the user must replace it before the vault opens.</DialogDescription></DialogHeader><form id="user-form" className="form-grid two-column" onSubmit={createUser}><Field label="Full name"><Input name="name" required /></Field><Field label="Email"><Input name="email" type="email" required /></Field><SelectField name="role" label="Role" value={newRole} onChange={(value) => setNewRole(value as Role)} required>{Object.entries(roleLabels).filter(([role]) => role !== 'workspace_owner' && (!clientAdmin || role === 'client_user')).map(([role, label]) => <option value={role} key={role}>{label}</option>)}</SelectField>{assignClient && <SelectField name="clientId" label="Client" value={newClientId} onChange={setNewClientId} required><option value="">Select client</option>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</SelectField>}<Field label="Temporary password" hint="Generated locally and sent once by the server; never stored as plaintext."><div className="input-action"><Input name="password" type="password" minLength={14} required autoComplete="new-password" value={temporaryPassword} onChange={(event) => setTemporaryPassword(event.target.value)} /><Button type="button" variant="outline" onClick={() => setTemporaryPassword(securePassword())}><RefreshCw /> Generate</Button></div></Field>{assignClient && <fieldset className="permission-checks"><legend>Initial client access</legend>{[['canView', 'View records', true], ['canManage', 'Create and edit', false], ['canReveal', 'Reveal and copy secrets', true], ['canExport', 'Export documentation', false]].map(([name, label, checked]) => <label key={String(name)}><input name={String(name)} type="checkbox" defaultChecked={Boolean(checked)} /><span>{String(label)}</span></label>)}</fieldset>}</form><DialogFooter><Button variant="outline" onClick={() => setUserOpen(false)}>Cancel</Button><Button type="submit" form="user-form"><Mail /> Verify, create & email</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(editingUser)} onOpenChange={(open) => { if (!open) setEditingUser(null); }}><DialogContent className="form-dialog"><DialogHeader><DialogTitle>Edit user</DialogTitle><DialogDescription>Changing an email address changes the address used to sign in. Existing authenticator codes continue to work.</DialogDescription></DialogHeader><form id="edit-user-form" className="form-grid" onSubmit={updateUserProfile}><Field label="Full name"><Input name="name" required minLength={2} maxLength={120} defaultValue={editingUser?.name} autoFocus /></Field><Field label="Email"><Input name="email" type="email" required maxLength={254} defaultValue={editingUser?.email} /></Field></form><DialogFooter><Button variant="outline" onClick={() => setEditingUser(null)}>Cancel</Button><Button type="submit" form="edit-user-form"><Pencil /> Verify & save user</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={permissionOpen} onOpenChange={setPermissionOpen}><DialogContent className="form-dialog form-dialog-wide"><DialogHeader><DialogTitle>Grant scoped access</DialogTitle><DialogDescription>More specific location or collection grants override broader client grants. Client Admins cannot grant an action they do not have themselves.</DialogDescription></DialogHeader><form id="permission-form" className="form-grid two-column" onSubmit={savePermission}><SelectField name="userId" label="User" value={targetUserId} onChange={setTargetUserId} required><option value="">Select user</option>{grantableUsers.map((user) => <option key={user.id} value={user.id}>{user.name} — {roleLabels[user.role]}</option>)}</SelectField><SelectField name="clientId" label="Client" value={clientId} onChange={(value) => { setClientId(value); setLocationId(''); }} required><option value="">Select client</option>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</SelectField><SelectField name="locationId" label="Location (optional)" value={locationId} onChange={setLocationId}><option value="">All client locations</option>{data.locations.filter((location) => location.client_id === clientId).map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</SelectField><SelectField name="collection" label="Collection (optional)"><option value="">All collections</option>{Object.entries(collectionLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectField><fieldset className="permission-checks"><legend>Allowed actions</legend>{[['canView', 'View records'], ['canManage', 'Create and edit'], ['canReveal', 'Reveal and copy secrets'], ['canExport', 'Export documentation']].map(([name, label]) => <label key={name}><input name={name} type="checkbox" defaultChecked={name === 'canView'} /><span>{label}</span></label>)}</fieldset></form><DialogFooter><Button variant="outline" onClick={() => setPermissionOpen(false)}>Cancel</Button><Button type="submit" form="permission-form"><ShieldCheck /> Verify & save grant</Button></DialogFooter></DialogContent></Dialog>
   </>;

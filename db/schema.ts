@@ -14,6 +14,9 @@ export const hostedSchemaStatements = [
     failed_login_count INTEGER NOT NULL DEFAULT 0,
     locked_until TEXT,
     disabled_at TEXT,
+    must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0,1)),
+    welcome_sent_at TEXT,
+    welcome_send_count INTEGER NOT NULL DEFAULT 0,
     last_login_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

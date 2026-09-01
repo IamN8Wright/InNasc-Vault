@@ -22,6 +22,13 @@ if (!userColumns.some((column) => column.name === 'disabled_at')) {
   db.exec(fs.readFileSync(migrationPath, 'utf8'));
 }
 db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(2, new Date().toISOString());
+const onboardingColumns = db.pragma('table_info(users)') as Array<{ name: string }>;
+const onboardingMigrationPath = fileURLToPath(new URL('./migrations/003_user_onboarding.sql', import.meta.url));
+const onboardingStatements = fs.readFileSync(onboardingMigrationPath, 'utf8').split(';').map((statement) => statement.trim()).filter(Boolean);
+for (const [index, column] of ['must_change_password', 'welcome_sent_at', 'welcome_send_count'].entries()) {
+  if (!onboardingColumns.some((existing) => existing.name === column)) db.exec(`${onboardingStatements[index]};`);
+}
+db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(3, new Date().toISOString());
 db.pragma('optimize');
 
 // Vault keys live only in process memory. Restarting the app intentionally invalidates sessions.

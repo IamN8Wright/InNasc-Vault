@@ -20,6 +20,13 @@ export class ApiProblem extends Error {
 type HostedEnvironment = {
   INNASC_SERVER_KEY?: string;
   INNASC_SETUP_TOKEN?: string;
+  INNASC_SMTP_HOST?: string;
+  INNASC_SMTP_PORT?: string;
+  INNASC_SMTP_SECURE?: string;
+  INNASC_SMTP_USER?: string;
+  INNASC_SMTP_PASSWORD?: string;
+  INNASC_SMTP_FROM?: string;
+  INNASC_APP_URL?: string;
 };
 
 let database: Database.Database | null = null;
@@ -29,6 +36,13 @@ export function hostedEnv(): HostedEnvironment {
   return {
     INNASC_SERVER_KEY: process.env.INNASC_SERVER_KEY,
     INNASC_SETUP_TOKEN: process.env.INNASC_SETUP_TOKEN,
+    INNASC_SMTP_HOST: process.env.INNASC_SMTP_HOST,
+    INNASC_SMTP_PORT: process.env.INNASC_SMTP_PORT,
+    INNASC_SMTP_SECURE: process.env.INNASC_SMTP_SECURE,
+    INNASC_SMTP_USER: process.env.INNASC_SMTP_USER,
+    INNASC_SMTP_PASSWORD: process.env.INNASC_SMTP_PASSWORD,
+    INNASC_SMTP_FROM: process.env.INNASC_SMTP_FROM,
+    INNASC_APP_URL: process.env.INNASC_APP_URL,
   };
 }
 
@@ -61,6 +75,15 @@ export async function ensureHostedSchema() {
     const userColumns = activeDatabase.pragma('table_info(users)') as Array<{ name: string }>;
     if (!userColumns.some((column) => column.name === 'disabled_at')) {
       activeDatabase.exec('ALTER TABLE users ADD COLUMN disabled_at TEXT');
+    }
+    if (!userColumns.some((column) => column.name === 'must_change_password')) {
+      activeDatabase.exec('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0,1))');
+    }
+    if (!userColumns.some((column) => column.name === 'welcome_sent_at')) {
+      activeDatabase.exec('ALTER TABLE users ADD COLUMN welcome_sent_at TEXT');
+    }
+    if (!userColumns.some((column) => column.name === 'welcome_send_count')) {
+      activeDatabase.exec('ALTER TABLE users ADD COLUMN welcome_send_count INTEGER NOT NULL DEFAULT 0');
     }
   })();
   schemaReady = true;

@@ -142,6 +142,38 @@ try {
   });
   assert.equal(hostedClientUser.response.status, 201);
   assert.deepEqual(hostedClientUser.body.clientIds, [client.body.id]);
+  assert.equal(hostedClientUser.body.mustChangePassword, true);
+  assert.deepEqual(hostedClientUser.body.welcomeEmail, { configured: false, sent: false });
+
+  const missingEmailConfiguration = await request(`/users/${hostedClientUser.body.id}/resend-welcome`, { method: 'POST', body: {}, csrf: true });
+  assert.equal(missingEmailConfiguration.response.status, 503);
+  assert.equal(missingEmailConfiguration.body.code, 'EMAIL_NOT_CONFIGURED');
+
+  const ownerCookie = cookie;
+  const ownerCsrfToken = csrfToken;
+  cookie = '';
+  const hostedClientUserLogin = await request('/auth/login', {
+    method: 'POST',
+    body: { email: 'hosted-client-user@example.invalid', password: hostedClientUserPassword },
+  });
+  assert.equal(hostedClientUserLogin.response.status, 200);
+  assert.equal(hostedClientUserLogin.body.kind, 'enrollment');
+  const hostedClientUserMfa = await generate({ secret: hostedClientUserLogin.body.manualKey });
+  const hostedClientUserVerified = await request('/auth/mfa/verify', {
+    method: 'POST',
+    body: { challengeId: hostedClientUserLogin.body.challengeId, code: hostedClientUserMfa },
+  });
+  assert.equal(hostedClientUserVerified.response.status, 200);
+  csrfToken = hostedClientUserVerified.body.csrfToken;
+  const hostedBlockedBeforePasswordChange = await request('/dashboard');
+  assert.equal(hostedBlockedBeforePasswordChange.response.status, 428);
+  assert.equal(hostedBlockedBeforePasswordChange.body.code, 'PASSWORD_CHANGE_REQUIRED');
+  const hostedPrivatePassword = `P!v4${crypto.randomBytes(18).toString('base64url')}`;
+  const hostedPasswordChanged = await request('/auth/change-temporary-password', { method: 'POST', body: { password: hostedPrivatePassword }, csrf: true });
+  assert.equal(hostedPasswordChanged.response.status, 200);
+  assert.equal(hostedPasswordChanged.body.user.mustChangePassword, false);
+  cookie = ownerCookie;
+  csrfToken = ownerCsrfToken;
 
   const updatedHostedClientUser = await request(`/users/${hostedClientUser.body.id}`, {
     method: 'PATCH',
@@ -249,8 +281,10 @@ try {
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.welcome_email'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'auth.temporary_password_changed'));
 
-  console.log('PASS: Railway hosted MFA, user editing/removal, encryption, exports, backup, and audit smoke test');
+  console.log('PASS: Railway hosted MFA, onboarding email safeguards, user editing/removal, encryption, exports, backup, and audit smoke test');
 } finally {
   server.kill();
   await delay(500);

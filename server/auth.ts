@@ -35,7 +35,8 @@ const dummyHashPromise = hashPassword(`not-a-user-${randomBase64Url(16)}`);
 const userSelect = `
   SELECT id, name, email, role, password_hash, kdf_salt, wrapped_key_nonce,
     wrapped_key_ciphertext, mfa_secret_nonce, mfa_secret_ciphertext,
-    mfa_enabled, failed_login_count, locked_until, disabled_at, last_login_at, created_at, updated_at
+    mfa_enabled, failed_login_count, locked_until, disabled_at, must_change_password,
+    welcome_sent_at, welcome_send_count, last_login_at, created_at, updated_at
   FROM users
 `;
 
@@ -203,6 +204,9 @@ export function publicUser(user: UserRow) {
     passkeyCount,
     clientIds,
     disabledAt: user.disabled_at,
+    mustChangePassword: Boolean(user.must_change_password),
+    welcomeSentAt: user.welcome_sent_at,
+    welcomeSendCount: user.welcome_send_count,
     lastLoginAt: user.last_login_at,
   };
 }
@@ -224,8 +228,8 @@ export async function createManagedUser(
     INSERT INTO users (
       id, name, email, role, password_hash, kdf_salt, wrapped_key_nonce,
       wrapped_key_ciphertext, mfa_secret_nonce, mfa_secret_ciphertext,
-      mfa_enabled, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      mfa_enabled, must_change_password, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
   `).run(
     userId,
     input.name,
@@ -417,6 +421,14 @@ export function requireCsrf(request: Request, response: Response, next: NextFunc
   return next();
 }
 
+export function requirePasswordChangeComplete(request: Request, response: Response, next: NextFunction) {
+  const auth = (request as AuthenticatedRequest).auth;
+  if (auth.user.must_change_password) {
+    return response.status(428).json({ error: 'Create a new password before opening the vault.', code: 'PASSWORD_CHANGE_REQUIRED' });
+  }
+  return next();
+}
+
 export function requireStepUp(request: Request, response: Response, next: NextFunction) {
   const auth = (request as AuthenticatedRequest).auth;
   if (!auth.session.step_up_until || Date.parse(auth.session.step_up_until) <= Date.now()) {
@@ -451,6 +463,50 @@ export function currentSession(request: AuthenticatedRequest) {
     expiresAt: request.auth.session.expires_at,
     stepUpUntil: request.auth.session.step_up_until,
   };
+}
+
+export async function changeTemporaryPassword(request: AuthenticatedRequest, password: string) {
+  if (!request.auth.user.must_change_password) {
+    throw Object.assign(new Error('This temporary password has already been replaced.'), { status: 409, code: 'PASSWORD_ALREADY_CHANGED' });
+  }
+  const kdfSalt = newSalt();
+  const derivedKey = await deriveKey(password, kdfSalt);
+  const wrappedKey = wrapVaultKey(request.auth.user.id, request.auth.vaultKey, derivedKey);
+  const passwordHash = await hashPassword(password);
+  const changedAt = nowIso();
+  db.prepare(`UPDATE users SET password_hash = ?, kdf_salt = ?, wrapped_key_nonce = ?, wrapped_key_ciphertext = ?,
+    must_change_password = 0, failed_login_count = 0, locked_until = NULL, updated_at = ? WHERE id = ?`).run(
+    passwordHash,
+    kdfSalt,
+    wrappedKey.nonce,
+    wrappedKey.ciphertext,
+    changedAt,
+    request.auth.user.id,
+  );
+  request.auth.user = getUserById(request.auth.user.id)!;
+  audit({ request, actorUserId: request.auth.user.id, eventType: 'auth.temporary_password_changed', targetType: 'user', targetId: request.auth.user.id });
+  return currentSession(request);
+}
+
+export async function rotateTemporaryPassword(targetUser: UserRow, vaultKey: Uint8Array, password: string) {
+  const kdfSalt = newSalt();
+  const derivedKey = await deriveKey(password, kdfSalt);
+  const wrappedKey = wrapVaultKey(targetUser.id, vaultKey, derivedKey);
+  const passwordHash = await hashPassword(password);
+  db.prepare(`UPDATE users SET password_hash = ?, kdf_salt = ?, wrapped_key_nonce = ?, wrapped_key_ciphertext = ?,
+    must_change_password = 1, failed_login_count = 0, locked_until = NULL, updated_at = ? WHERE id = ?`).run(
+    passwordHash,
+    kdfSalt,
+    wrappedKey.nonce,
+    wrappedKey.ciphertext,
+    nowIso(),
+    targetUser.id,
+  );
+  revokeUserSessions(targetUser.id);
+}
+
+export function makeTemporaryPassword() {
+  return `Nv!9${randomBase64Url(24)}`;
 }
 
 export function logout(request: AuthenticatedRequest, response: Response) {

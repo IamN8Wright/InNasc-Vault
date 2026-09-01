@@ -40,6 +40,8 @@ The password unlocks the wrapped workspace key. There is no password-reset backd
 - Workspace Owner, Admin, Technician, Client Admin, Client User, and Read Only roles
 - Client/location/collection permission grants enforced by the API
 - Mandatory authenticator MFA during first sign-in, one-time recovery codes, attempt limits, and account lockout
+- Welcome email delivery for administrator-created users, with audited resend and automatic temporary-password rotation
+- Forced replacement of every temporary password after MFA enrollment and before any vault API can be used
 - Optional Windows Hello/security-key passkeys in the local build; hosted passkeys are intentionally disabled pending a dedicated WebAuthn review
 - Five-minute step-up MFA for reveal, copy, delete, exports, backup, MFA reset, and permission changes
 - Cryptographically secure password generator in the browser
@@ -54,7 +56,7 @@ The password unlocks the wrapped workspace key. There is no password-reset backd
 - **Clients:** create client, location, and system records.
 - **Credential vault:** add, reveal, copy, edit, or delete encrypted secrets. Reveal and copy require a fresh MFA check.
 - **Devices & software:** track non-secret inventory. Put passwords and tokens in the vault instead of notes.
-- **Users & permissions:** Workspace Owners/Admins can create users, edit names and sign-in emails, grant scoped access, reset MFA, and safely remove or restore accounts. Client Admins can create and manage Client Users only inside their assigned client-wide management scopes. New and restored users must enroll MFA on first sign-in.
+- **Users & permissions:** Workspace Owners/Admins can create users, edit names and sign-in emails, resend onboarding messages, grant scoped access, reset MFA, and safely remove or restore accounts. Client Admins can create and manage Client Users only inside their assigned client-wide management scopes. A new user receives their temporary password by email, enrolls MFA, saves recovery codes, and must create a new password before the vault opens.
 - **Security & backup:** enroll a local passkey, export password-free documentation, or download an encrypted-data backup.
 
 ## Local data location
@@ -84,7 +86,26 @@ Deploy the repository as a single Node 22 web service. Railway installs the lock
 
 1. Attach a persistent Railway volume to the service. The application uses Railway's `RAILWAY_VOLUME_MOUNT_PATH` automatically and creates `innasc-vault-hosted.sqlite3` there.
 2. Set `INNASC_SERVER_KEY` to a random 32-byte base64url value and `INNASC_SETUP_TOKEN` to a separate high-entropy one-time setup value. Keep both secret and never commit them.
-3. Keep the service at one replica while it uses SQLite.
-4. Configure `/api/health` as the health check, attach the custom domain, and verify Railway volume backups before storing important data.
+3. Add the SMTP variables below as private Railway variables. Until these are present, users can still be created, but the interface clearly marks the welcome email as pending.
+4. Keep the service at one replica while it uses SQLite.
+5. Configure `/api/health` as the health check, attach the custom domain, and verify Railway volume backups before storing important data.
+
+### Welcome email configuration
+
+Use a dedicated transactional-email or business-mail SMTP account. Put these values only in Railway **Variables** (or Windows environment variables for the local build), never in GitHub:
+
+```text
+INNASC_SMTP_HOST=smtp.example.com
+INNASC_SMTP_PORT=587
+INNASC_SMTP_SECURE=false
+INNASC_SMTP_USER=your-smtp-username
+INNASC_SMTP_PASSWORD=your-smtp-password
+INNASC_SMTP_FROM=InNasc Vault <vault@innasc.com>
+INNASC_APP_URL=https://vault.innasc.com
+```
+
+Use port `465` with `INNASC_SMTP_SECURE=true` for implicit TLS, or port `587` with `false` for mandatory STARTTLS. If the SMTP relay does not use authentication, omit both `INNASC_SMTP_USER` and `INNASC_SMTP_PASSWORD` and set `INNASC_SMTP_FROM`. Restart or redeploy after changing variables.
+
+Creating a user attempts delivery immediately. **Resend welcome** generates and stores a new password hash and key wrapping, revokes that user’s sessions, invalidates the earlier temporary password, and sends only the new temporary password. The plaintext value is never stored in SQLite, audit records, or source code.
 
 The SQLite schema uses UUID text identifiers and a repository boundary intended to ease a later PostgreSQL migration. The Railway beta is not the final paid-service architecture.

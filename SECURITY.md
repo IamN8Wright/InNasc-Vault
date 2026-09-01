@@ -12,6 +12,8 @@ Use unique test credentials first. Before storing irreplaceable client secrets, 
 - Each user password derives a separate key-encryption key that wraps the workspace key. The password is not stored.
 - TOTP enrollment secrets are encrypted with the workspace key.
 - Recovery codes are random, shown once, stored only as hashes, and consumed after one use.
+- Administrator-created accounts are marked for onboarding. After MFA enrollment, every protected vault route remains blocked until the temporary password is replaced and the workspace key is rewrapped with the new password-derived key.
+- A welcome-email resend creates a new cryptographically random temporary password, revokes that user’s sessions and login challenges, and invalidates the earlier temporary password. Plaintext temporary passwords are not stored in the database or audit log.
 - Session tokens are random; only their SHA-256 hashes are stored. Session cookies are HttpOnly and SameSite=Strict.
 - Mutating authenticated requests require a session-bound CSRF token.
 - Sensitive credential actions require a recent TOTP, recovery-code, or supported passkey step-up.
@@ -49,7 +51,8 @@ The hosted design is **not zero knowledge**. The deployed server processes passw
 - Clipboard clearing is not reliable across browsers or clipboard-history/sync features. Copy only when necessary.
 - Metadata is not encrypted. Client names, locations, record titles, URLs, users, timestamps, and audit details may be visible to the database/platform operator.
 - The audit hash chain detects simple editing but is not equivalent to a separately controlled, signed append-only audit service. Concurrent hosted writes and privileged database replacement remain outside this guarantee.
-- There is no email verification, invitation delivery, security notification, device approval, remote session management, automatic update channel, breach monitoring, or audited account-recovery workflow.
+- Welcome email is simple SMTP delivery, not verified identity proof. There is no email-address verification, expiring invitation link, security notification system, device approval, remote session management, automatic update channel, breach monitoring, or audited account-recovery workflow.
+- The user-requested welcome message contains a temporary password. This exposes that one-time secret to the recipient’s mailbox, SMTP provider, mail retention, forwarding, and compromised email accounts. MFA and the forced replacement reduce but do not eliminate that risk; a paid production service should replace emailed passwords with short-lived, single-use setup links.
 - The hosted beta is a single workspace. Billing, subscription enforcement, tenant isolation, organization lifecycle, and customer-support controls are not implemented.
 - The Railway SQLite service must remain at one replica. Multi-replica writes require a tested PostgreSQL migration and concurrency controls.
 - Passkeys are MFA/step-up factors only in the local build, not passwordless vault unlock.
@@ -61,7 +64,7 @@ The hosted design is **not zero knowledge**. The deployed server processes passw
 
 1. Commission an independent threat model, source review, cryptographic review, dependency review, and penetration test.
 2. Decide and document the hosted key model. Build and review client-side encryption, per-collection key wrapping, user removal, rotation, and recovery before making zero-knowledge claims.
-3. Implement and test tenant isolation, billing/subscription state, invitations, email verification, organization deletion/export, rate limiting, abuse protection, and operator access controls.
+3. Implement and test tenant isolation, billing/subscription state, short-lived single-use invitation links, email verification, delivery/bounce handling, organization deletion/export, rate limiting, abuse protection, and operator access controls.
 4. Move to a production database design with versioned migrations, transaction/concurrency testing, encrypted backups, point-in-time recovery, restore drills, rollback, and disaster recovery.
 5. Put deployment keys in a reviewed KMS/HSM-backed process with rotation, dual control, access logs, and an emergency revocation plan.
 6. Add fixed WebAuthn RP ID/origin handling, security notifications, remote session/device management, verified recovery, and passkey recovery testing.

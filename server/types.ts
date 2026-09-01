@@ -17,6 +17,9 @@ export type UserRow = {
   failed_login_count: number;
   locked_until: string | null;
   disabled_at: string | null;
+  must_change_password: number;
+  welcome_sent_at: string | null;
+  welcome_send_count: number;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;

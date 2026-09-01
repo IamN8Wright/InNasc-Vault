@@ -9,23 +9,28 @@ import { audit } from './audit.js';
 import {
   beginInitialSetup,
   beginLogin,
+  changeTemporaryPassword,
   completeLoginChallenge,
   createManagedUser,
   currentSession,
   getUserById,
   logout,
+  makeTemporaryPassword,
   performStepUp,
   publicUser,
   requireAuth,
   requireCsrf,
+  requirePasswordChangeComplete,
   requireStepUp,
   resetUserMfa,
+  rotateTemporaryPassword,
   revokeUserSessions,
   setupStatus,
 } from './auth.js';
 import { collections, roles, type Collection } from './config.js';
 import { decryptJson, encryptJson } from './crypto.js';
 import { db, newId, nowIso } from './db.js';
+import { sendWelcomeEmail, welcomeEmailConfigured } from './email.js';
 import {
   assertPermission,
   assertWorkspaceAdmin,
@@ -65,6 +70,7 @@ const setupSchema = z.object({
 const loginSchema = z.object({ email: z.string().trim().email().max(254), password: z.string().min(1).max(256) });
 const mfaSchema = z.object({ challengeId: z.string().min(16).max(200), code: z.string().trim().min(6).max(32) });
 const stepUpSchema = z.object({ code: z.string().trim().min(6).max(32) });
+const temporaryPasswordChangeSchema = z.object({ password: strongPassword });
 const entityName = z.string().trim().min(1).max(180);
 
 const clientSchema = z.object({
@@ -268,6 +274,13 @@ router.post('/auth/logout', requireCsrf, (request, response) => {
   logout(authRequest(request), response);
   response.status(204).end();
 });
+
+router.post('/auth/change-temporary-password', requireCsrf, asyncRoute(async (request, response) => {
+  const input = temporaryPasswordChangeSchema.parse(request.body);
+  response.json(await changeTemporaryPassword(authRequest(request), input.password));
+}));
+
+router.use(requirePasswordChangeComplete);
 
 router.post('/auth/step-up', requireCsrf, asyncRoute(async (request, response) => {
   const input = stepUpSchema.parse(request.body);
@@ -503,7 +516,50 @@ router.post('/users', requireCsrf, requireStepUp, asyncRoute(async (request, res
       canExport: input.canExport,
     });
   }
-  response.status(201).json(publicUser(getUserById(created.id)!));
+  const welcomeEmail = await sendWelcomeEmail({
+    name: input.name,
+    email: input.email.toLowerCase(),
+    temporaryPassword: input.password,
+    mfaAlreadyEnrolled: false,
+  });
+  if (welcomeEmail.sent) {
+    db.prepare('UPDATE users SET welcome_sent_at = ?, welcome_send_count = welcome_send_count + 1, updated_at = ? WHERE id = ?').run(nowIso(), nowIso(), created.id);
+  }
+  audit({
+    request,
+    actorUserId: auth.auth.user.id,
+    eventType: 'user.welcome_email',
+    targetType: 'user',
+    targetId: created.id,
+    outcome: welcomeEmail.sent ? 'success' : welcomeEmail.configured ? 'failure' : 'blocked',
+    detail: { reason: welcomeEmail.sent ? 'sent' : welcomeEmail.configured ? 'delivery_failed' : 'smtp_not_configured' },
+  });
+  response.status(201).json({ ...publicUser(getUserById(created.id)!), welcomeEmail });
+}));
+
+router.post('/users/:id/resend-welcome', requireCsrf, requireStepUp, asyncRoute(async (request, response) => {
+  const auth = authRequest(request);
+  const target = getUserById(String(request.params.id));
+  if (!target) return response.status(404).json({ error: 'User not found.' });
+  assertCanManageTargetUser(auth.auth.user, target);
+  if (target.disabled_at) return response.status(409).json({ error: 'Restore this user before resending the welcome email.' });
+  if (!target.must_change_password) return response.status(409).json({ error: 'This user has completed onboarding. Use a password-reset workflow instead.', code: 'ONBOARDING_COMPLETE' });
+  if (!welcomeEmailConfigured()) {
+    audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'blocked', detail: { reason: 'smtp_not_configured', resend: true } });
+    return response.status(503).json({ error: 'Welcome email is not configured. Add the SMTP settings, then try again.', code: 'EMAIL_NOT_CONFIGURED' });
+  }
+
+  const temporaryPassword = makeTemporaryPassword();
+  await rotateTemporaryPassword(target, auth.auth.vaultKey, temporaryPassword);
+  const welcomeEmail = await sendWelcomeEmail({ name: target.name, email: target.email, temporaryPassword, mfaAlreadyEnrolled: Boolean(target.mfa_enabled) });
+  if (!welcomeEmail.sent) {
+    audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, outcome: 'failure', detail: { reason: 'delivery_failed', resend: true, passwordRotated: true } });
+    return response.status(502).json({ error: 'The temporary password was rotated, but email delivery failed. Check SMTP and resend again.', code: 'EMAIL_DELIVERY_FAILED' });
+  }
+  const sentAt = nowIso();
+  db.prepare('UPDATE users SET welcome_sent_at = ?, welcome_send_count = welcome_send_count + 1, updated_at = ? WHERE id = ?').run(sentAt, sentAt, target.id);
+  audit({ request, actorUserId: auth.auth.user.id, eventType: 'user.welcome_email', targetType: 'user', targetId: target.id, detail: { resend: true, passwordRotated: true } });
+  return response.json({ ...publicUser(getUserById(target.id)!), welcomeEmail });
 }));
 
 router.patch('/users/:id', requireCsrf, requireStepUp, (request, response) => {

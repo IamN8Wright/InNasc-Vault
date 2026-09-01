@@ -111,6 +111,8 @@ try {
   }));
   assert.equal(clientAdmin.response.status, 201);
   assert.deepEqual(clientAdmin.body.clientIds, [client.body.id]);
+  assert.equal(clientAdmin.body.mustChangePassword, true);
+  assert.deepEqual(clientAdmin.body.welcomeEmail, { configured: false, sent: false });
 
   cookie = '';
   const clientAdminLogin = await request('/auth/login', {
@@ -126,6 +128,14 @@ try {
   });
   assert.equal(clientAdminVerified.response.status, 200);
   csrfToken = clientAdminVerified.body.csrfToken;
+  assert.equal(clientAdminVerified.body.user.mustChangePassword, true);
+  const blockedBeforePasswordChange = await request('/dashboard');
+  assert.equal(blockedBeforePasswordChange.response.status, 428);
+  assert.equal(blockedBeforePasswordChange.body.code, 'PASSWORD_CHANGE_REQUIRED');
+  const clientAdminPrivatePassword = `P!v4${crypto.randomBytes(18).toString('base64url')}`;
+  const changedClientAdminPassword = await request('/auth/change-temporary-password', secured({ password: clientAdminPrivatePassword }));
+  assert.equal(changedClientAdminPassword.response.status, 200);
+  assert.equal(changedClientAdminPassword.body.user.mustChangePassword, false);
   const clientAdminStepUpCode = await generate({ secret: clientAdminLogin.body.manualKey });
   const clientAdminStepUp = await request('/auth/step-up', secured({ code: clientAdminStepUpCode }));
   assert.equal(clientAdminStepUp.response.status, 200);
@@ -158,6 +168,7 @@ try {
   assert.equal(clientUser.response.status, 201);
   assert.equal(clientUser.body.role, 'client_user');
   assert.deepEqual(clientUser.body.clientIds, [client.body.id]);
+  assert.equal(clientUser.body.mustChangePassword, true);
 
   const updatedClientUser = await request(`/users/${clientUser.body.id}`, {
     ...secured({ name: 'Updated Client User', email: 'updated-client-user@example.invalid' }),
@@ -243,6 +254,8 @@ try {
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'user.welcome_email'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'auth.temporary_password_changed'));
 
   const sqlite = new Database(databasePath, { readonly: true });
   const stored = sqlite.prepare('SELECT secret_ciphertext FROM credentials WHERE id = ?').get(credential.body.id);
@@ -250,7 +263,7 @@ try {
   assert.equal(stored.secret_ciphertext.includes(testSecret), false);
   sqlite.close();
 
-  console.log('PASS: encryption, MFA, scoped Client Admin users, user editing/removal, safe export, and audit smoke test');
+  console.log('PASS: encryption, MFA, forced password onboarding, scoped Client Admin users, user editing/removal, safe export, and audit smoke test');
 } finally {
   server.kill('SIGTERM');
   await Promise.race([new Promise((resolve) => server.once('exit', resolve)), delay(3000)]);
