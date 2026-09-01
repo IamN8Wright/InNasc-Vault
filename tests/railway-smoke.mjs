@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import Database from 'better-sqlite3';
 import { generate } from 'otplib';
+import { PDFDocument } from 'pdf-lib';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'innasc-vault-railway-test-'));
 const port = 3999;
@@ -47,7 +48,11 @@ async function request(pathname, options = {}) {
   const setCookie = response.headers.get('set-cookie');
   if (setCookie) cookie = setCookie.split(';')[0];
   const contentType = response.headers.get('content-type') ?? '';
-  const body = contentType.includes('application/json') ? await response.json() : await response.text();
+  const body = contentType.includes('application/json')
+    ? await response.json()
+    : contentType.includes('application/pdf')
+      ? await response.arrayBuffer()
+      : await response.text();
   return { response, body };
 }
 
@@ -302,11 +307,13 @@ try {
     csrf: true,
   });
   assert.equal(offboarding.response.status, 200);
-  assert.match(offboarding.response.headers.get('content-type') ?? '', /^text\/html/u);
-  assert.match(offboarding.response.headers.get('content-disposition') ?? '', /InNasc_Offboarding_.*\.html/u);
-  assert.ok(offboarding.body.includes('CONFIDENTIAL — CONTAINS PLAINTEXT CREDENTIALS'));
-  assert.ok(offboarding.body.includes('synthetic-user'));
-  assert.ok(offboarding.body.includes(testSecret));
+  assert.match(offboarding.response.headers.get('content-type') ?? '', /^application\/pdf/u);
+  assert.match(offboarding.response.headers.get('content-disposition') ?? '', /InNasc_Offboarding_.*\.pdf/u);
+  const offboardingBytes = new Uint8Array(offboarding.body);
+  assert.equal(new TextDecoder().decode(offboardingBytes.slice(0, 5)), '%PDF-');
+  const offboardingPdf = await PDFDocument.load(offboardingBytes);
+  assert.ok(offboardingPdf.getPageCount() > 0);
+  assert.equal(offboardingPdf.getTitle(), 'InNasc Vault Offboarding Export');
 
   const backup = await request('/exports/backup', { method: 'POST', body: {}, csrf: true });
   assert.equal(backup.response.status, 200);

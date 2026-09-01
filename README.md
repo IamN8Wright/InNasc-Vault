@@ -48,7 +48,7 @@ The password unlocks the wrapped workspace key. There is no password-reset backd
 - Editable user display names with step-up MFA and audit history
 - Auditing for sign-in, MFA, reveal, copy, create, update, delete, permissions, blocked shares, and exports
 - Documentation export that always omits secret fields
-- Dedicated offboarding export for authorized users, with plaintext-secret warnings, explicit acknowledgment, step-up MFA, and audit logging
+- Dedicated PDF offboarding export for authorized users, with plaintext-secret warnings, explicit acknowledgment, step-up MFA, and audit logging
 - Encrypted SQLite backup locally and encrypted-data JSON export in the hosted beta
 - Temporary sharing disabled in both evaluation builds
 

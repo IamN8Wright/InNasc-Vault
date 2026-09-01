@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import Database from 'better-sqlite3';
 import { generate } from 'otplib';
+import { PDFDocument } from 'pdf-lib';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'innasc-vault-test-'));
 const databasePath = path.join(tempDir, 'vault.sqlite3');
@@ -279,12 +280,13 @@ try {
   assert.equal(rejectedOffboarding.response.status, 400);
   const offboarding = await request('/exports/offboarding', secured({ clientId: client.body.id, acknowledged: true }));
   assert.equal(offboarding.response.status, 200);
-  assert.match(offboarding.response.headers.get('content-type') ?? '', /^text\/html/u);
-  assert.match(offboarding.response.headers.get('content-disposition') ?? '', /InNasc_Offboarding_.*\.html/u);
-  const offboardingHtml = new TextDecoder().decode(offboarding.body);
-  assert.ok(offboardingHtml.includes('CONFIDENTIAL — CONTAINS PLAINTEXT CREDENTIALS'));
-  assert.ok(offboardingHtml.includes('test-user'));
-  assert.ok(offboardingHtml.includes(testSecret));
+  assert.match(offboarding.response.headers.get('content-type') ?? '', /^application\/pdf/u);
+  assert.match(offboarding.response.headers.get('content-disposition') ?? '', /InNasc_Offboarding_.*\.pdf/u);
+  const offboardingBytes = new Uint8Array(offboarding.body);
+  assert.equal(new TextDecoder().decode(offboardingBytes.slice(0, 5)), '%PDF-');
+  const offboardingPdf = await PDFDocument.load(offboardingBytes);
+  assert.ok(offboardingPdf.getPageCount() > 0);
+  assert.equal(offboardingPdf.getTitle(), 'InNasc Vault Offboarding Export');
 
   const audit = await request('/audit');
   assert.equal(audit.response.status, 200);
