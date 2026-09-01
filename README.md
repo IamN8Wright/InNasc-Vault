@@ -48,6 +48,7 @@ The password unlocks the wrapped workspace key. There is no password-reset backd
 - Editable user display names with step-up MFA and audit history
 - Auditing for sign-in, MFA, reveal, copy, create, update, delete, permissions, blocked shares, and exports
 - Documentation export that always omits secret fields
+- Dedicated offboarding export for authorized users, with plaintext-secret warnings, explicit acknowledgment, step-up MFA, and audit logging
 - Encrypted SQLite backup locally and encrypted-data JSON export in the hosted beta
 - Temporary sharing disabled in both evaluation builds
 
@@ -57,7 +58,7 @@ The password unlocks the wrapped workspace key. There is no password-reset backd
 - **Credential vault:** add, reveal, copy, edit, or delete encrypted secrets. Reveal and copy require a fresh MFA check.
 - **Devices & software:** track non-secret inventory. Put passwords and tokens in the vault instead of notes.
 - **Users & permissions:** Workspace Owners/Admins can create users, edit names and sign-in emails, resend onboarding messages, grant scoped access, reset MFA, and safely remove or restore accounts. Client Admins can create and manage Client Users only inside their assigned client-wide management scopes. A new user receives their temporary password by email, enrolls MFA, saves recovery codes, and must create a new password before the vault opens.
-- **Security & backup:** enroll a local passkey, export password-free documentation, or download an encrypted-data backup.
+- **Security & backup:** enroll a local passkey, export password-free documentation, download an encrypted-data backup, or create a portable offboarding document. The offboarding file contains plaintext credentials and must be moved to encrypted storage or imported into a trusted password manager immediately.
 
 ## Local data location
 

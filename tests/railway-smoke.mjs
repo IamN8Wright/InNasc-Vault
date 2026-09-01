@@ -290,6 +290,24 @@ try {
   assert.equal(documentationJson.includes(testSecret), false);
   assert.ok(documentationJson.includes('[OMITTED]'));
 
+  const rejectedOffboarding = await request('/exports/offboarding', {
+    method: 'POST',
+    body: { clientId: client.body.id, acknowledged: false },
+    csrf: true,
+  });
+  assert.equal(rejectedOffboarding.response.status, 400);
+  const offboarding = await request('/exports/offboarding', {
+    method: 'POST',
+    body: { clientId: client.body.id, acknowledged: true },
+    csrf: true,
+  });
+  assert.equal(offboarding.response.status, 200);
+  assert.match(offboarding.response.headers.get('content-type') ?? '', /^text\/html/u);
+  assert.match(offboarding.response.headers.get('content-disposition') ?? '', /InNasc_Offboarding_.*\.html/u);
+  assert.ok(offboarding.body.includes('CONFIDENTIAL — CONTAINS PLAINTEXT CREDENTIALS'));
+  assert.ok(offboarding.body.includes('synthetic-user'));
+  assert.ok(offboarding.body.includes(testSecret));
+
   const backup = await request('/exports/backup', { method: 'POST', body: {}, csrf: true });
   assert.equal(backup.response.status, 200);
   const backupJson = JSON.stringify(backup.body);
@@ -303,14 +321,16 @@ try {
   assert.equal(audit.response.status, 200);
   assert.ok(Array.isArray(audit.body));
   assert.ok(audit.body.some((entry) => entry.event_type === 'credential.reveal'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'export.offboarding'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.permanent_delete'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.welcome_email'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'auth.temporary_password_changed'));
+  assert.equal(JSON.stringify(audit.body).includes(testSecret), false);
 
-  console.log('PASS: Railway hosted MFA, onboarding email safeguards, user editing/removal, encryption, exports, backup, and audit smoke test');
+  console.log('PASS: Railway hosted MFA, onboarding email safeguards, user editing/removal, encryption, safe/offboarding exports, backup, and audit smoke test');
 } finally {
   server.kill();
   await delay(500);

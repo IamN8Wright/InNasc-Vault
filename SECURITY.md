@@ -21,6 +21,7 @@ Use unique test credentials first. Before storing irreplaceable client secrets, 
 - Access decisions are enforced by the API, including client, location, and collection scope.
 - Audit entries omit secret values, are application-immutable through database triggers, and form a SHA-256 hash chain.
 - Documentation export substitutes `[OMITTED]` for secret content.
+- The separate offboarding export requires a recent MFA step-up, explicit plaintext-risk acknowledgment, and both reveal and export permission for every included credential. Its audit event records counts, never secret values.
 - Temporary public sharing is disabled.
 
 ## Local Windows build
@@ -49,6 +50,7 @@ The hosted design is **not zero knowledge**. The deployed server processes passw
 - Neither build nor its dependencies has undergone an independent penetration test or cryptographic implementation audit.
 - An administrator, malware process, debugger, browser extension, or keylogger controlling a user device may capture passwords, decrypted secrets, clipboard contents, or an in-memory workspace key.
 - Clipboard clearing is not reliable across browsers or clipboard-history/sync features. Copy only when necessary.
+- Offboarding HTML exports intentionally contain readable usernames, passwords, PINs, tokens, license keys, and secret notes. The downloaded file has no encryption of its own; browser history, Downloads folders, backups, sync tools, endpoint monitoring, and anyone with file access may expose it. Move it to encrypted storage or import it into a trusted password manager immediately, do not email it, and securely delete every copy when finished.
 - Metadata is not encrypted. Client names, locations, record titles, URLs, users, timestamps, and audit details may be visible to the database/platform operator.
 - The audit hash chain detects simple editing but is not equivalent to a separately controlled, signed append-only audit service. Concurrent hosted writes and privileged database replacement remain outside this guarantee.
 - Welcome email uses the configured Resend HTTPS API or SMTP fallback, but delivery is not verified identity proof. There is no email-address verification, expiring invitation link, security notification system, device approval, remote session management, automatic update channel, breach monitoring, or audited account-recovery workflow.

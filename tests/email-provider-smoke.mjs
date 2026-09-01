@@ -34,6 +34,9 @@ try {
   assert.ok(message.text.includes('This email address is not monitored. Please do not reply.'));
   assert.ok(message.html.includes('https://vault.innasc.com'));
   assert.ok(message.html.includes('src="cid:innasc-vault-logo"'));
+  assert.ok(message.html.includes('Welcome to your secure InNasc workspace.'));
+  assert.ok(message.html.includes('Complete your secure setup'));
+  assert.ok(message.html.indexOf('Complete your secure setup') < message.html.indexOf('Temporary password:'));
   assert.deepEqual(message.attachments, [
     {
       path: 'https://vault.innasc.com/innasc-vault-mark.png',

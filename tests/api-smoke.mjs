@@ -275,16 +275,29 @@ try {
   assert.equal(exportText.includes(testSecret), false);
   assert.equal(documentation.body.secretsIncluded, false);
 
+  const rejectedOffboarding = await request('/exports/offboarding', secured({ clientId: client.body.id, acknowledged: false }));
+  assert.equal(rejectedOffboarding.response.status, 400);
+  const offboarding = await request('/exports/offboarding', secured({ clientId: client.body.id, acknowledged: true }));
+  assert.equal(offboarding.response.status, 200);
+  assert.match(offboarding.response.headers.get('content-type') ?? '', /^text\/html/u);
+  assert.match(offboarding.response.headers.get('content-disposition') ?? '', /InNasc_Offboarding_.*\.html/u);
+  const offboardingHtml = new TextDecoder().decode(offboarding.body);
+  assert.ok(offboardingHtml.includes('CONFIDENTIAL — CONTAINS PLAINTEXT CREDENTIALS'));
+  assert.ok(offboardingHtml.includes('test-user'));
+  assert.ok(offboardingHtml.includes(testSecret));
+
   const audit = await request('/audit');
   assert.equal(audit.response.status, 200);
   assert.ok(audit.body.some((entry) => entry.event_type === 'credential.reveal'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'export.documentation'));
+  assert.ok(audit.body.some((entry) => entry.event_type === 'export.offboarding'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.update'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.remove'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.restore'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.permanent_delete'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'user.welcome_email'));
   assert.ok(audit.body.some((entry) => entry.event_type === 'auth.temporary_password_changed'));
+  assert.equal(JSON.stringify(audit.body).includes(testSecret), false);
 
   const sqlite = new Database(databasePath, { readonly: true });
   const stored = sqlite.prepare('SELECT secret_ciphertext FROM credentials WHERE id = ?').get(credential.body.id);
@@ -292,7 +305,7 @@ try {
   assert.equal(stored.secret_ciphertext.includes(testSecret), false);
   sqlite.close();
 
-  console.log('PASS: encryption, MFA, forced password onboarding, scoped Client Admin users, user editing/removal, safe export, and audit smoke test');
+  console.log('PASS: encryption, MFA, forced password onboarding, scoped Client Admin users, user editing/removal, safe/offboarding exports, and audit smoke test');
 } finally {
   server.kill('SIGTERM');
   await Promise.race([new Promise((resolve) => server.once('exit', resolve)), delay(3000)]);

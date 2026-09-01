@@ -150,6 +150,10 @@ const userProfileSchema = z.object({
   clientId: z.string().uuid().nullable().optional(),
 });
 const permanentDeleteUserSchema = z.object({ confirmation: z.string().trim().max(254) });
+const offboardingExportSchema = z.object({
+  clientId: z.string().uuid().nullable().optional(),
+  acknowledged: z.boolean(),
+});
 
 const permissionSchema = z.object({
   userId: z.string().uuid(),
@@ -248,6 +252,85 @@ function credentialById(id: string) {
     LEFT JOIN systems s ON s.id = c.system_id
     WHERE c.id = ?
   `).get(id) as Record<string, unknown> | undefined;
+}
+
+type OffboardingCredential = {
+  name: string;
+  collection: string;
+  systemName: string;
+  url: string;
+  lastVerifiedAt: string;
+  expiresAt: string;
+  secret: VaultSecret;
+};
+
+type OffboardingLocation = {
+  name: string;
+  address: string;
+  notes: string;
+  systems: Array<Record<string, unknown>>;
+  assets: Array<Record<string, unknown>>;
+  credentials: OffboardingCredential[];
+};
+
+type OffboardingClient = {
+  name: string;
+  code: string;
+  notes: string;
+  locations: OffboardingLocation[];
+};
+
+function textValue(value: unknown) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  return JSON.stringify(value) ?? '';
+}
+
+function escapeHtml(value: unknown) {
+  return textValue(value).replace(/[&<>"']/gu, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character] ?? character);
+}
+
+function offboardingHtml(input: { exportedAt: string; exportedBy: string; clients: OffboardingClient[] }) {
+  const field = (label: string, value: unknown, secret = false) => {
+    const normalized = textValue(value);
+    if (!normalized) return '';
+    return `<div class="field${secret ? ' secret' : ''}"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(normalized)}</dd></div>`;
+  };
+  const systems = (rows: Array<Record<string, unknown>>) => rows.length ? `
+    <section><h3>Systems</h3><div class="record-grid">${rows.map((row) => `<article class="record"><h4>${escapeHtml(row.name)}</h4><dl>
+      ${field('Collection', row.collection)}${field('Manufacturer', row.manufacturer)}${field('Model', row.model)}${field('Network address', row.network_address)}${field('Notes', row.notes)}
+    </dl></article>`).join('')}</div></section>` : '';
+  const assets = (rows: Array<Record<string, unknown>>) => rows.length ? `
+    <section><h3>Devices, software &amp; website accounts</h3><div class="record-grid">${rows.map((row) => `<article class="record"><h4>${escapeHtml(row.name)}</h4><dl>
+      ${field('Type', row.asset_type)}${field('System', row.system_name)}${field('Vendor', row.vendor)}${field('Version / model', row.version_or_model)}${field('Identifier', row.identifier)}${field('URL', row.url)}${field('Notes', row.notes)}
+    </dl></article>`).join('')}</div></section>` : '';
+  const credentials = (rows: OffboardingCredential[]) => rows.length ? `
+    <section><h3>Usernames &amp; passwords</h3><div class="credential-grid">${rows.map((row) => `<article class="record credential"><h4>${escapeHtml(row.name)}</h4><dl>
+      ${field('Collection', row.collection)}${field('System', row.systemName)}${field('URL', row.url)}${field('Username', row.secret.username, true)}${field('Password', row.secret.password, true)}${field('PIN', row.secret.pin, true)}${field('API token', row.secret.apiToken, true)}${field('License key', row.secret.licenseKey, true)}${field('Secret notes', row.secret.notes, true)}${field('Last verified', row.lastVerifiedAt)}${field('Expires', row.expiresAt)}
+    </dl></article>`).join('')}</div></section>` : '';
+  const clients = input.clients.map((client) => `<article class="client">
+    <header><div><p class="eyebrow">CLIENT</p><h1>${escapeHtml(client.name)}</h1></div>${client.code ? `<span class="code">${escapeHtml(client.code)}</span>` : ''}</header>
+    ${client.notes ? `<p class="notes">${escapeHtml(client.notes)}</p>` : ''}
+    ${client.locations.map((location) => `<article class="location"><h2>${escapeHtml(location.name)}</h2>${location.address ? `<p class="address">${escapeHtml(location.address)}</p>` : ''}${location.notes ? `<p class="notes">${escapeHtml(location.notes)}</p>` : ''}${systems(location.systems)}${assets(location.assets)}${credentials(location.credentials)}</article>`).join('')}
+  </article>`).join('');
+
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>InNasc Vault Offboarding Export</title><style>
+:root{color-scheme:light;font-family:Inter,Segoe UI,Arial,sans-serif;color:#102033;background:#f3f6fa}*{box-sizing:border-box}body{margin:0}main{width:min(1120px,calc(100% - 32px));margin:32px auto 64px}.warning{border:4px solid #b42318;background:#fff1f0;padding:24px;border-radius:14px}.warning strong{display:block;color:#b42318;font-size:24px;margin-bottom:8px}.warning p{margin:6px 0;line-height:1.55}.meta{display:flex;flex-wrap:wrap;gap:12px 28px;margin:20px 0;color:#526377;font-size:13px}.client,.location,.record{background:#fff;border:1px solid #cbd5e1;border-radius:12px}.client{margin:24px 0;padding:22px}.client>header{display:flex;justify-content:space-between;gap:20px;align-items:center;border-bottom:2px solid #1f5dd9;padding-bottom:14px}.eyebrow{color:#1f5dd9;font-size:11px;font-weight:800;letter-spacing:.14em;margin:0 0 4px}.client h1{font-size:26px;margin:0}.code{background:#e8f0ff;color:#1547a8;border-radius:999px;padding:7px 12px;font-weight:700}.location{margin-top:20px;padding:18px}.location>h2{margin:0 0 4px;font-size:20px}.address,.notes{white-space:pre-wrap;color:#526377;line-height:1.55}.location section{margin-top:22px}.location h3{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:#34506f;border-bottom:1px solid #d9e1eb;padding-bottom:8px}.record-grid,.credential-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.record{padding:14px;min-width:0}.record h4{margin:0 0 10px;font-size:15px;color:#17314f}.record dl{margin:0}.field{display:grid;grid-template-columns:minmax(90px,.6fr) minmax(0,1.4fr);gap:10px;padding:7px 0;border-top:1px solid #edf1f5}.field dt{font-size:11px;font-weight:700;color:#62748a}.field dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.field.secret{background:#fff8e8;margin:0 -8px;padding:8px}.field.secret dt{color:#8a4b08}.empty{padding:20px;background:#fff;border:1px solid #cbd5e1;border-radius:12px}@media print{body{background:#fff}main{width:100%;margin:0}.warning{break-inside:avoid}.client{break-before:page;border:0;padding:0}.client:first-of-type{break-before:auto}.record{break-inside:avoid}}
+</style></head><body><main>
+<aside class="warning"><strong>CONFIDENTIAL — CONTAINS PLAINTEXT CREDENTIALS</strong><p>This file is not encrypted. Store it on an encrypted drive or import it into a trusted password manager immediately.</p><p>Do not email it, upload it to ordinary cloud storage, or leave it in Downloads. Securely delete every copy when it is no longer needed.</p></aside>
+<div class="meta"><span><b>Exported:</b> ${escapeHtml(input.exportedAt)}</span><span><b>Exported by:</b> ${escapeHtml(input.exportedBy)}</span><span><b>Source:</b> InNasc Vault</span></div>
+${clients || '<p class="empty">No records were available for this export.</p>'}
+</main></body></html>`;
 }
 
 router.get('/health', (_request, response) => response.json({ status: 'ok', service: 'InNasc Vault local API' }));
@@ -757,6 +840,80 @@ router.post('/exports/documentation', requireCsrf, requireStepUp, (request, resp
   audit({ request, actorUserId: auth.auth.user.id, eventType: 'export.documentation', targetType: 'workspace', detail: { clientCount: exported.length, secretsIncluded: false } });
   response.setHeader('Content-Disposition', `attachment; filename="InNasc_Documentation_${new Date().toISOString().slice(0, 10)}.json"`);
   response.json({ format: 'InNasc Documentation Export v1', exportedAt: nowIso(), secretsIncluded: false, clients: exported });
+});
+
+router.post('/exports/offboarding', requireCsrf, requireStepUp, (request, response) => {
+  const auth = authRequest(request);
+  const input = offboardingExportSchema.parse(request.body);
+  if (!input.acknowledged) return response.status(400).json({ error: 'You must acknowledge that this export contains plaintext credentials.' });
+  const ids = input.clientId ? [input.clientId] : clientIdsFor(auth.auth.user);
+  const clients = (ids === null
+    ? db.prepare('SELECT id, name, code, notes FROM clients ORDER BY name').all()
+    : ids.length
+      ? db.prepare(`SELECT id, name, code, notes FROM clients WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY name`).all(...ids)
+      : []) as Array<Record<string, unknown>>;
+  const exported: OffboardingClient[] = [];
+  let credentialCount = 0;
+
+  for (const client of clients) {
+    const clientId = String(client.id);
+    const clientExportAllowed = hasPermission(auth.auth.user, { clientId }, 'export');
+    const rows = db.prepare('SELECT id, name, address, notes FROM locations WHERE client_id = ? ORDER BY name').all(clientId) as Array<Record<string, unknown>>;
+    const locations: OffboardingLocation[] = [];
+    for (const location of rows) {
+      const locationId = String(location.id);
+      const locationExportAllowed = hasPermission(auth.auth.user, { clientId, locationId }, 'export');
+      const systemRows = db.prepare('SELECT id, name, collection, manufacturer, model, network_address, notes FROM systems WHERE location_id = ? ORDER BY name').all(locationId) as Array<Record<string, unknown>>;
+      const allowedSystems = systemRows.filter((row) => hasPermission(auth.auth.user, { clientId, locationId, collection: row.collection as Collection }, 'export'));
+      const allowedAssets = locationExportAllowed
+        ? db.prepare('SELECT a.asset_type, a.name, a.vendor, a.version_or_model, a.identifier, a.url, a.notes, s.name AS system_name FROM assets a LEFT JOIN systems s ON s.id = a.system_id WHERE a.location_id = ? ORDER BY a.name').all(locationId) as Array<Record<string, unknown>>
+        : [];
+      const credentialRows = db.prepare('SELECT c.id, c.collection, c.name, c.url, c.secret_nonce, c.secret_ciphertext, c.last_verified_at, c.expires_at, s.name AS system_name FROM credentials c LEFT JOIN systems s ON s.id = c.system_id WHERE c.location_id = ? ORDER BY c.name').all(locationId) as Array<Record<string, unknown>>;
+      const allowedCredentials: OffboardingCredential[] = [];
+      for (const credential of credentialRows) {
+        const scope = { clientId, locationId, collection: credential.collection as Collection };
+        if (!hasPermission(auth.auth.user, scope, 'export') || !hasPermission(auth.auth.user, scope, 'reveal')) continue;
+        const secret = decryptJson<VaultSecret>(String(credential.secret_nonce), String(credential.secret_ciphertext), auth.auth.vaultKey, `credential:${String(credential.id)}:v1`);
+        allowedCredentials.push({
+          name: String(credential.name),
+          collection: String(credential.collection),
+          systemName: textValue(credential.system_name),
+          url: textValue(credential.url),
+          lastVerifiedAt: textValue(credential.last_verified_at),
+          expiresAt: textValue(credential.expires_at),
+          secret,
+        });
+      }
+      credentialCount += allowedCredentials.length;
+      if (!locationExportAllowed && !allowedSystems.length && !allowedCredentials.length) continue;
+      locations.push({
+        name: String(location.name),
+        address: locationExportAllowed ? textValue(location.address) : '',
+        notes: locationExportAllowed ? textValue(location.notes) : '',
+        systems: allowedSystems,
+        assets: allowedAssets,
+        credentials: allowedCredentials,
+      });
+    }
+    if (!locations.length) continue;
+    exported.push({
+      name: String(client.name),
+      code: textValue(client.code),
+      notes: clientExportAllowed ? textValue(client.notes) : '',
+      locations,
+    });
+  }
+
+  if (!exported.length) return response.status(403).json({ error: 'No offboarding records are available with your current export and reveal permissions.' });
+  const exportedAt = nowIso();
+  const html = offboardingHtml({ exportedAt, exportedBy: `${auth.auth.user.name} <${auth.auth.user.email}>`, clients: exported });
+  audit({ request, actorUserId: auth.auth.user.id, eventType: 'export.offboarding', targetType: 'workspace', detail: { clientCount: exported.length, credentialCount, secretsIncluded: true, plaintext: true } });
+  response.setHeader('Cache-Control', 'no-store');
+  response.setHeader('Pragma', 'no-cache');
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('Content-Type', 'text/html; charset=utf-8');
+  response.setHeader('Content-Disposition', `attachment; filename="InNasc_Offboarding_${exportedAt.slice(0, 10)}.html"`);
+  return response.send(html);
 });
 
 router.post('/exports/backup', requireCsrf, requireStepUp, asyncRoute(async (request, response) => {
